@@ -1,113 +1,152 @@
-import Database from "better-sqlite3";
-import { existsSync, mkdirSync } from "node:fs";
-import path from "node:path";
+import { Redis } from "@upstash/redis";
 import type { RunRecord, RunSummary } from "./types";
 
-const DATA_DIR = path.join(process.cwd(), ".data");
-const DB_PATH = path.join(DATA_DIR, "runs.db");
+/**
+ * Run persistence.
+ *
+ * Serverless (Vercel) has a read-only filesystem, so the old better-sqlite3 file
+ * store is gone. If Upstash Redis credentials are present we use those; otherwise
+ * we fall back to an in-process Map (fine for local dev / a quick demo, but
+ * ephemeral — a warm Vercel instance keeps it, a cold one starts empty).
+ *
+ * Add persistence on Vercel by attaching the "Upstash for Redis" integration
+ * (Storage tab) — it injects UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN
+ * (KV_REST_API_URL / KV_REST_API_TOKEN also accepted). No redeploy of code needed.
+ */
 
-let db: Database.Database | null = null;
+const KEY_PREFIX = "adtester:run:";
+const INDEX_KEY = "adtester:runs:index";
+const MAX_RUNS = 200;
+const TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
+const MAX_VALUE_BYTES = 1_000_000; // Upstash free-tier per-request ceiling
 
-function getDb(): Database.Database {
-  if (db) return db;
-  if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
-  db = new Database(DB_PATH);
-  db.pragma("journal_mode = WAL");
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS runs (
-      id TEXT PRIMARY KEY,
-      created_at INTEGER NOT NULL,
-      label TEXT,
-      script TEXT NOT NULL,
-      input_mode TEXT NOT NULL,
-      resolved_type TEXT NOT NULL,
-      options_json TEXT NOT NULL,
-      status TEXT NOT NULL,
-      error TEXT,
-      result_json TEXT
-    );
-    CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs (created_at DESC);
-  `);
-  return db;
+const redisUrl = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
+const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
+
+interface Store {
+  kind: "redis" | "memory";
+  insert(record: RunRecord): Promise<void>;
+  get(id: string): Promise<RunRecord | null>;
+  remove(id: string): Promise<boolean>;
+  list(limit: number): Promise<RunRecord[]>;
 }
 
-export function insertRun(record: RunRecord): void {
-  getDb()
-    .prepare(
-      `INSERT INTO runs (id, created_at, label, script, input_mode, resolved_type, options_json, status, error, result_json)
-       VALUES (@id, @created_at, @label, @script, @input_mode, @resolved_type, @options_json, @status, @error, @result_json)`,
-    )
-    .run({
-      id: record.id,
-      created_at: record.createdAt,
-      label: record.label,
-      script: record.script,
-      input_mode: record.inputMode,
-      resolved_type: record.resolvedType,
-      options_json: JSON.stringify(record.options),
-      status: record.status,
-      error: record.error,
-      result_json: record.result ? JSON.stringify(record.result) : null,
-    });
-}
+/* ----------------------------- in-memory store ---------------------------- */
 
-interface Row {
-  id: string;
-  created_at: number;
-  label: string | null;
-  script: string;
-  input_mode: string;
-  resolved_type: string;
-  options_json: string;
-  status: string;
-  error: string | null;
-  result_json: string | null;
-}
-
-function rowToRecord(row: Row): RunRecord {
+function createMemoryStore(): Store {
+  const map = new Map<string, RunRecord>();
   return {
-    id: row.id,
-    createdAt: row.created_at,
-    label: row.label,
-    script: row.script,
-    inputMode: row.input_mode as RunRecord["inputMode"],
-    resolvedType: row.resolved_type as RunRecord["resolvedType"],
-    options: JSON.parse(row.options_json),
-    status: row.status as RunRecord["status"],
-    error: row.error,
-    result: row.result_json ? JSON.parse(row.result_json) : null,
+    kind: "memory",
+    async insert(record) {
+      map.set(record.id, record);
+      if (map.size > MAX_RUNS) {
+        const oldest = [...map.values()].sort((a, b) => a.createdAt - b.createdAt)[0];
+        if (oldest) map.delete(oldest.id);
+      }
+    },
+    async get(id) {
+      return map.get(id) ?? null;
+    },
+    async remove(id) {
+      return map.delete(id);
+    },
+    async list(limit) {
+      return [...map.values()].sort((a, b) => b.createdAt - a.createdAt).slice(0, limit);
+    },
   };
 }
 
-export function getRun(id: string): RunRecord | null {
-  const row = getDb().prepare("SELECT * FROM runs WHERE id = ?").get(id) as Row | undefined;
-  return row ? rowToRecord(row) : null;
+/* ------------------------------- redis store ----------------------------- */
+
+function serialize(record: RunRecord): string {
+  let json = JSON.stringify(record);
+  if (json.length > MAX_VALUE_BYTES && record.result?.screenshot) {
+    // Drop the (large) screenshot rather than fail the whole write.
+    json = JSON.stringify({
+      ...record,
+      result: { ...record.result, screenshot: null },
+    });
+  }
+  return json;
 }
 
-export function deleteRun(id: string): boolean {
-  return getDb().prepare("DELETE FROM runs WHERE id = ?").run(id).changes > 0;
+function createRedisStore(url: string, token: string): Store {
+  const redis = new Redis({ url, token });
+
+  return {
+    kind: "redis",
+    async insert(record) {
+      await redis.set(KEY_PREFIX + record.id, serialize(record), { ex: TTL_SECONDS });
+      await redis.zadd(INDEX_KEY, { score: record.createdAt, member: record.id });
+      // Trim the index to the most recent MAX_RUNS ids.
+      await redis.zremrangebyrank(INDEX_KEY, 0, -(MAX_RUNS + 1));
+    },
+    async get(id) {
+      const raw = await redis.get<RunRecord | string>(KEY_PREFIX + id);
+      if (!raw) return null;
+      return typeof raw === "string" ? (JSON.parse(raw) as RunRecord) : raw;
+    },
+    async remove(id) {
+      const removed = await redis.del(KEY_PREFIX + id);
+      await redis.zrem(INDEX_KEY, id);
+      return removed > 0;
+    },
+    async list(limit) {
+      const ids = await redis.zrange<string[]>(INDEX_KEY, 0, limit - 1, { rev: true });
+      if (!ids.length) return [];
+      const raws = await redis.mget<(RunRecord | string)[]>(...ids.map((id) => KEY_PREFIX + id));
+      return raws
+        .map((raw) => (typeof raw === "string" ? (JSON.parse(raw) as RunRecord) : raw))
+        .filter((r): r is RunRecord => Boolean(r));
+    },
+  };
 }
 
-export function listRuns(limit = 50): RunSummary[] {
-  const rows = getDb()
-    .prepare("SELECT * FROM runs ORDER BY created_at DESC LIMIT ?")
-    .all(limit) as Row[];
-  return rows.map((row) => {
-    const record = rowToRecord(row);
-    const r = record.result;
-    return {
-      id: record.id,
-      createdAt: record.createdAt,
-      label: record.label,
-      resolvedType: record.resolvedType,
-      status: record.status,
-      requestCount: r?.metrics.requestCount ?? 0,
-      totalBytes: r?.metrics.totalBytes ?? 0,
-      thirdPartyDomainCount: r?.metrics.thirdPartyDomains.length ?? 0,
-      consoleErrorCount: r?.metrics.consoleErrorCount ?? 0,
-      failCheckCount: r?.checks.filter((c) => c.status === "fail").length ?? 0,
-      warnCheckCount: r?.checks.filter((c) => c.status === "warn").length ?? 0,
-      durationMs: r?.durationMs ?? 0,
-    } satisfies RunSummary;
-  });
+/* -------------------------------- selection ----------------------------- */
+
+let store: Store;
+try {
+  store = redisUrl && redisToken ? createRedisStore(redisUrl, redisToken) : createMemoryStore();
+} catch (err) {
+  console.error("Redis store init failed, falling back to memory:", err);
+  store = createMemoryStore();
+}
+
+export const storeKind = store.kind;
+
+/* --------------------------------- API --------------------------------- */
+
+export async function insertRun(record: RunRecord): Promise<void> {
+  await store.insert(record);
+}
+
+export async function getRun(id: string): Promise<RunRecord | null> {
+  return store.get(id);
+}
+
+export async function deleteRun(id: string): Promise<boolean> {
+  return store.remove(id);
+}
+
+export async function listRuns(limit = 50): Promise<RunSummary[]> {
+  const records = await store.list(limit);
+  return records.map(summarize);
+}
+
+function summarize(record: RunRecord): RunSummary {
+  const r = record.result;
+  return {
+    id: record.id,
+    createdAt: record.createdAt,
+    label: record.label,
+    resolvedType: record.resolvedType,
+    status: record.status,
+    requestCount: r?.metrics.requestCount ?? 0,
+    totalBytes: r?.metrics.totalBytes ?? 0,
+    thirdPartyDomainCount: r?.metrics.thirdPartyDomains.length ?? 0,
+    consoleErrorCount: r?.metrics.consoleErrorCount ?? 0,
+    failCheckCount: r?.checks.filter((c) => c.status === "fail").length ?? 0,
+    warnCheckCount: r?.checks.filter((c) => c.status === "warn").length ?? 0,
+    durationMs: r?.durationMs ?? 0,
+  } satisfies RunSummary;
 }

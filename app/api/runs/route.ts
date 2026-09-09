@@ -13,7 +13,7 @@ const VALID_MODES: InputMode[] = ["auto", "script-tag", "raw-html", "script-url"
 
 export async function GET() {
   try {
-    return NextResponse.json({ runs: listRuns() });
+    return NextResponse.json({ runs: await listRuns() });
   } catch (err) {
     return NextResponse.json({ error: message(err) }, { status: 500 });
   }
@@ -60,7 +60,7 @@ export async function POST(request: Request) {
   };
 
   try {
-    insertRun(record);
+    await insertRun(record);
   } catch (err) {
     return NextResponse.json({ error: `Run completed but could not be saved: ${message(err)}`, record }, { status: 500 });
   }

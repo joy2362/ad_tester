@@ -14,9 +14,27 @@ import type {
 
 let browserPromise: Promise<Browser> | null = null;
 
+// Vercel / AWS Lambda: no bundled Chromium and a read-only FS, so use the
+// Lambda-sized build from @sparticuz/chromium. Locally we fall through to the
+// browser that @playwright/browser-chromium downloaded on install.
+const isServerless = Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.VERCEL);
+
+async function launchBrowser(): Promise<Browser> {
+  if (isServerless) {
+    const { default: sparticuz } = await import("@sparticuz/chromium");
+    sparticuz.setGraphicsMode = false;
+    return chromium.launch({
+      executablePath: await sparticuz.executablePath(),
+      args: sparticuz.args,
+      headless: true,
+    });
+  }
+  return chromium.launch({ headless: true });
+}
+
 async function getBrowser(): Promise<Browser> {
   if (!browserPromise) {
-    browserPromise = chromium.launch({ headless: true }).catch((err) => {
+    browserPromise = launchBrowser().catch((err) => {
       browserPromise = null;
       throw err;
     });
@@ -204,7 +222,7 @@ export async function executeRun(
 
     let screenshot: string | null = null;
     try {
-      const buf = await page.screenshot({ type: "jpeg", quality: 62, fullPage: false });
+      const buf = await page.screenshot({ type: "jpeg", quality: 55, fullPage: false });
       screenshot = `data:image/jpeg;base64,${buf.toString("base64")}`;
     } catch {
       /* ignore screenshot failure */
