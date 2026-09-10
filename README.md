@@ -1,4 +1,4 @@
-# ViewSense Ad Tester
+# ViewSense Ad Tag Taster
 
 Paste an ad tag or script, run it in a real headless Chromium sandbox, and inspect
 everything it does — network requests, cookies, console errors, redirects, payload
@@ -31,13 +31,21 @@ Open http://localhost:3000.
 2. The server wraps it in a sandbox document served from `https://sandbox.ad-tester.local/`
    (an intercepted route — never a real DNS lookup) and loads it in a fresh, isolated
    browser context.
-3. Every request/response/failure, console message, page error and cookie is recorded.
-   After `load` + a network-idle wait + a fixed settle delay, it screenshots the page
-   and snapshots the ad container's DOM.
+3. Every request/response/failure, console message, page error and cookie is recorded —
+   including, per request, the **request + response headers, timing breakdown
+   (DNS/connect/TLS/TTFB/download), redirect chain, which frame issued it, and a body
+   preview** for text responses (toggle "Capture request/response headers & body
+   previews" in Advanced options). Nested frames and popups are tracked too. After
+   `load` + a network-idle wait + a fixed settle delay it screenshots the page and
+   snapshots the ad container's DOM.
 4. Heuristic checks run (HTTPS-only, payload < 1 MB, request count, load time, redirect
    hops, third-party cookies, `document.write`, clickTag/CLICK_URL macro, creative
-   rendered).
-5. The run is saved to the run store and shown in **History**, where two runs can be
+   rendered, **passback / no-fill handled**).
+5. **Passback detection**: when a tag can't fill and hands back another tag (or returns a
+   no-fill / 204 / empty `seatbid`), the report flags the chain, lists the signals, and
+   says whether a fallback creative still rendered — i.e. whether the sandbox followed
+   the passback or broke. A per-request `passback` badge marks the offending responses.
+6. The run is saved to the run store and shown in **History**, where two runs can be
    compared (the report shows deltas against the previous run).
 
 ## Key files
@@ -59,6 +67,12 @@ Open http://localhost:3000.
 - Tags run in an isolated browser context with **no access to the host machine**, but
   they *do* make real outbound network requests. Only run tags you understand.
 - Response sizes come from Playwright's `request.sizes()`; a few resource types report 0.
+- Body previews are capped (~12 KB each, ~350 KB / 60 responses per run) and only read
+  for document/script/xhr/fetch responses. If the stored run JSON still exceeds ~1 MB,
+  `lib/db.ts` drops the screenshot, then the bodies.
+- Response-body reads, `page.evaluate`, and the settle phase all have their own timeouts,
+  so a runaway passback loop can't hang the run — it finishes with whatever was captured.
+- Popups a tag opens are recorded and closed; their own sub-requests aren't traced.
 - `blockThirdParty` (advanced options) aborts every non-sandbox request — useful for an
   isolation / offline-behavior test.
 ## Deploying to Vercel

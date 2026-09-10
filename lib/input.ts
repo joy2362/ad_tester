@@ -52,7 +52,7 @@ export function buildSandboxDocument(raw: string, resolvedType: ResolvedInputTyp
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Ad Tester Sandbox</title>
+<title>Ad Tag Taster Sandbox</title>
 <style>
   html, body { margin: 0; padding: 0; background: #ffffff; }
   #ad-tester-container { min-height: 100%; }

@@ -266,6 +266,14 @@ export default function AdTester({ initial = null }: Props) {
               <label className="col-span-2 flex items-center gap-2 text-muted">
                 <input
                   type="checkbox"
+                  checked={options.captureBodies}
+                  onChange={(e) => setOptions((o) => ({ ...o, captureBodies: e.target.checked }))}
+                />
+                Capture request/response headers &amp; body previews
+              </label>
+              <label className="col-span-2 flex items-center gap-2 text-muted">
+                <input
+                  type="checkbox"
                   checked={options.blockThirdParty}
                   onChange={(e) => setOptions((o) => ({ ...o, blockThirdParty: e.target.checked }))}
                 />

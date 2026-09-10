@@ -11,20 +11,40 @@ export interface Check {
   detail: string;
 }
 
+export interface NetTiming {
+  dnsMs: number | null;
+  connectMs: number | null;
+  tlsMs: number | null;
+  ttfbMs: number | null;
+  downloadMs: number | null;
+  totalMs: number | null;
+}
+
 export interface NetRequest {
   url: string;
   domain: string;
   method: string;
   resourceType: string;
   status: number | null;
+  statusText: string | null;
   fromCache: boolean;
   bytes: number;
+  bodyBytes: number | null;
   timeMs: number | null;
   thirdParty: boolean;
   isRedirect: boolean;
+  isSubframe: boolean;
+  frameUrl: string | null;
+  redirectChain: string[];
   failed: boolean;
   failureText: string | null;
   category: "creative" | "tracker" | "script" | "document" | "media" | "other";
+  requestHeaders: Record<string, string>;
+  responseHeaders: Record<string, string>;
+  timing: NetTiming | null;
+  bodyPreview: string | null;
+  bodyTruncated: boolean;
+  passback: boolean;
 }
 
 export interface ConsoleMsg {
@@ -57,6 +77,15 @@ export interface RunMetrics {
   domNodes: number;
   detectedCreative: CreativeKind[];
   insecureRequestCount: number;
+  frameCount: number;
+  popupCount: number;
+  passbackRequestCount: number;
+}
+
+export interface PassbackReport {
+  detected: boolean;
+  signals: string[];
+  chainDomains: string[];
 }
 
 export interface RunResult {
@@ -69,6 +98,9 @@ export interface RunResult {
   pageErrors: string[];
   cookies: CookieInfo[];
   checks: Check[];
+  frames: string[];
+  popups: string[];
+  passback: PassbackReport;
 }
 
 export interface RunOptions {
@@ -77,6 +109,7 @@ export interface RunOptions {
   timeoutMs: number;
   settleMs: number;
   blockThirdParty: boolean;
+  captureBodies: boolean;
 }
 
 export interface RunRecord {
@@ -105,6 +138,7 @@ export interface RunSummary {
   failCheckCount: number;
   warnCheckCount: number;
   durationMs: number;
+  passbackDetected: boolean;
 }
 
 export const DEFAULT_OPTIONS: RunOptions = {
@@ -113,4 +147,5 @@ export const DEFAULT_OPTIONS: RunOptions = {
   timeoutMs: 20000,
   settleMs: 2500,
   blockThirdParty: false,
+  captureBodies: true,
 };

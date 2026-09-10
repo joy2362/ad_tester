@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import type { Check, ConsoleMsg, CookieInfo, NetRequest, RunRecord, RunSummary } from "@/lib/types";
 import { formatBytes } from "@/lib/heuristics";
 import SandboxPreview from "@/components/SandboxPreview";
@@ -175,6 +175,8 @@ function Overview({
     },
     { label: "Cookies (3p)", value: `${m.cookieCount} (${m.thirdPartyCookieCount})`, invert: true },
     { label: "Insecure http://", value: String(m.insecureRequestCount), invert: true },
+    { label: "Nested frames", value: String(m.frameCount ?? 0), invert: true },
+    { label: "Popups", value: String(m.popupCount ?? 0), invert: true },
     { label: "DOM nodes", value: String(m.domNodes) },
   ];
 
@@ -218,6 +220,45 @@ function Overview({
         )}
       </div>
 
+      {r.passback?.detected && (
+        <div className="rounded-lg border border-warn/40 bg-warn/10 p-3">
+          <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-warn">
+            Passback / no-fill detected
+          </div>
+          <p className="text-xs text-foreground">
+            {r.checks.find((c) => c.id === "passback-handled")?.detail ??
+              "The tag handed back to a fallback ad source."}
+          </p>
+          {r.passback.chainDomains.length > 1 && (
+            <p className="mt-1 text-xs text-muted">
+              Chain: {r.passback.chainDomains.join(" → ")}
+            </p>
+          )}
+          <ul className="mt-1 list-disc pl-4 text-xs text-muted">
+            {r.passback.signals.map((s, i) => (
+              <li key={i}>{s}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {(r.frames?.length > 0 || r.popups?.length > 0) && (
+        <div className="text-xs text-muted">
+          {r.frames?.length > 0 && (
+            <div>
+              <span className="font-semibold uppercase tracking-wider">Nested frames:</span>{" "}
+              <span className="break-all text-foreground">{r.frames.join("  ·  ")}</span>
+            </div>
+          )}
+          {r.popups?.length > 0 && (
+            <div className="mt-1">
+              <span className="font-semibold uppercase tracking-wider">Popups opened:</span>{" "}
+              <span className="break-all text-foreground">{r.popups.join("  ·  ")}</span>
+            </div>
+          )}
+        </div>
+      )}
+
       <div>
         <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted">
           Checks — {failCount} fail, {warnCount} warn
@@ -252,9 +293,16 @@ function diff(current: number, prev?: number): number | undefined {
 }
 
 function NetworkTable({ requests }: { requests: NetRequest[] }) {
-  const [filter, setFilter] = useState<"all" | NetRequest["category"]>("all");
-  const shown = filter === "all" ? requests : requests.filter((r) => r.category === filter);
+  const [filter, setFilter] = useState<"all" | "passback" | NetRequest["category"]>("all");
+  const [open, setOpen] = useState<number | null>(null);
   const cats = Array.from(new Set(requests.map((r) => r.category)));
+  const passbackCount = requests.filter((r) => r.passback).length;
+  const shown =
+    filter === "all"
+      ? requests
+      : filter === "passback"
+        ? requests.filter((r) => r.passback)
+        : requests.filter((r) => r.category === filter);
 
   if (requests.length === 0) return <p className="text-sm text-muted">No network requests were made.</p>;
 
@@ -264,15 +312,21 @@ function NetworkTable({ requests }: { requests: NetRequest[] }) {
         <FilterChip active={filter === "all"} onClick={() => setFilter("all")}>
           all ({requests.length})
         </FilterChip>
+        {passbackCount > 0 && (
+          <FilterChip active={filter === "passback"} onClick={() => setFilter("passback")}>
+            <span className="text-fail">passback ({passbackCount})</span>
+          </FilterChip>
+        )}
         {cats.map((c) => (
           <FilterChip key={c} active={filter === c} onClick={() => setFilter(c)}>
             {c} ({requests.filter((r) => r.category === c).length})
           </FilterChip>
         ))}
       </div>
-      <div className="max-h-[520px] overflow-auto rounded-md border">
-        <table className="w-full min-w-[720px] border-collapse text-left text-xs">
-          <thead className="sticky top-0 bg-panel-2 text-muted">
+      <p className="mb-2 text-[11px] text-muted">Click a row for headers, timing and body.</p>
+      <div className="max-h-[560px] overflow-auto rounded-md border">
+        <table className="w-full min-w-[760px] border-collapse text-left text-xs">
+          <thead className="sticky top-0 z-10 bg-panel-2 text-muted">
             <tr>
               <th className="p-2 font-medium">#</th>
               <th className="p-2 font-medium">Type</th>
@@ -285,35 +339,178 @@ function NetworkTable({ requests }: { requests: NetRequest[] }) {
             </tr>
           </thead>
           <tbody>
-            {shown.map((req, i) => (
-              <tr key={i} className="border-t border-border align-top hover:bg-panel-2/60">
-                <td className="p-2 text-muted">{i + 1}</td>
-                <td className="p-2">
-                  <span className={`rounded px-1.5 py-0.5 ${CATEGORY_COLOR[req.category]}`}>
-                    {req.category}
-                  </span>
-                  <span className="ml-1 text-muted">{req.resourceType}</span>
-                </td>
-                <td className="p-2 text-muted">{req.method}</td>
-                <td className={`p-2 ${req.thirdParty ? "text-accent" : "text-muted"}`}>{req.domain}</td>
-                <td className="max-w-[280px] truncate p-2 text-muted" title={req.url}>
-                  {stripDomain(req.url)}
-                </td>
-                <td className="p-2">
-                  {req.failed ? (
-                    <span className="text-fail" title={req.failureText ?? ""}>
-                      failed
-                    </span>
-                  ) : req.isRedirect ? (
-                    <span className="text-warn">{req.status} ↪</span>
-                  ) : (
-                    <span className={statusColor(req.status)}>{req.status ?? "—"}</span>
+            {shown.map((req, i) => {
+              const isOpen = open === i;
+              return (
+                <Fragment key={i}>
+                  <tr
+                    onClick={() => setOpen(isOpen ? null : i)}
+                    className={`cursor-pointer border-t border-border align-top hover:bg-panel-2/60 ${
+                      isOpen ? "bg-panel-2/60" : ""
+                    }`}
+                  >
+                    <td className="p-2 text-muted">
+                      <span className="mr-1 inline-block w-2 text-muted">{isOpen ? "▾" : "▸"}</span>
+                      {i + 1}
+                    </td>
+                    <td className="p-2">
+                      <span className={`rounded px-1.5 py-0.5 ${CATEGORY_COLOR[req.category]}`}>
+                        {req.category}
+                      </span>
+                      <span className="ml-1 text-muted">{req.resourceType}</span>
+                      {req.passback && (
+                        <span className="ml-1 rounded bg-fail/15 px-1 py-0.5 text-fail">passback</span>
+                      )}
+                      {req.isSubframe && (
+                        <span className="ml-1 rounded bg-accent/15 px-1 py-0.5 text-accent">subframe</span>
+                      )}
+                    </td>
+                    <td className="p-2 text-muted">{req.method}</td>
+                    <td className={`p-2 ${req.thirdParty ? "text-accent" : "text-muted"}`}>{req.domain}</td>
+                    <td className="max-w-[280px] truncate p-2 text-muted" title={req.url}>
+                      {stripDomain(req.url)}
+                    </td>
+                    <td className="p-2">
+                      {req.failed ? (
+                        <span className="text-fail" title={req.failureText ?? ""}>
+                          failed
+                        </span>
+                      ) : req.isRedirect ? (
+                        <span className="text-warn">{req.status} ↪</span>
+                      ) : (
+                        <span className={statusColor(req.status)}>{req.status ?? "—"}</span>
+                      )}
+                    </td>
+                    <td className="p-2 text-right text-muted">{req.bytes ? formatBytes(req.bytes) : "—"}</td>
+                    <td className="p-2 text-right text-muted">
+                      {req.timeMs != null ? `${req.timeMs} ms` : "—"}
+                    </td>
+                  </tr>
+                  {isOpen && (
+                    <tr className="border-t border-border bg-panel">
+                      <td colSpan={8} className="p-3">
+                        <RequestDetail req={req} />
+                      </td>
+                    </tr>
                   )}
-                </td>
-                <td className="p-2 text-right text-muted">{req.bytes ? formatBytes(req.bytes) : "—"}</td>
-                <td className="p-2 text-right text-muted">
-                  {req.timeMs != null ? `${req.timeMs} ms` : "—"}
-                </td>
+                </Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function RequestDetail({ req }: { req: NetRequest }) {
+  return (
+    <div className="flex flex-col gap-3 text-xs">
+      <div className="grid grid-cols-1 gap-x-6 gap-y-1 sm:grid-cols-2">
+        <Kv k="URL">
+          <span className="break-all font-mono text-foreground">{req.url}</span>
+        </Kv>
+        <Kv k="Method">{req.method}</Kv>
+        <Kv k="Status">
+          {req.failed
+            ? `failed — ${req.failureText ?? ""}`
+            : `${req.status ?? "—"}${req.statusText ? ` ${req.statusText}` : ""}`}
+        </Kv>
+        <Kv k="Category">
+          {req.category} · {req.resourceType}
+        </Kv>
+        <Kv k="Party">{req.thirdParty ? "third-party" : "first-party"}</Kv>
+        <Kv k="Frame">{req.isSubframe ? req.frameUrl || "nested frame" : "top sandbox"}</Kv>
+        <Kv k="Transferred">{req.bytes ? formatBytes(req.bytes) : "—"}</Kv>
+        <Kv k="Body size">{req.bodyBytes != null ? formatBytes(req.bodyBytes) : "—"}</Kv>
+      </div>
+
+      {(req.redirectChain?.length ?? 0) > 0 && (
+        <div>
+          <div className="mb-1 font-semibold uppercase tracking-wider text-muted">Redirect chain</div>
+          <ol className="list-decimal pl-5 font-mono text-[11px] text-muted">
+            {req.redirectChain.map((u, i) => (
+              <li key={i} className="break-all">
+                {u}
+              </li>
+            ))}
+            <li className="break-all text-foreground">{req.url}</li>
+          </ol>
+        </div>
+      )}
+
+      {req.timing && (
+        <div>
+          <div className="mb-1 font-semibold uppercase tracking-wider text-muted">Timing</div>
+          <div className="flex flex-col gap-0.5 font-mono text-[11px]">
+            <TimingRow label="DNS" ms={req.timing.dnsMs} />
+            <TimingRow label="Connect" ms={req.timing.connectMs} />
+            <TimingRow label="TLS" ms={req.timing.tlsMs} />
+            <TimingRow label="Wait (TTFB)" ms={req.timing.ttfbMs} />
+            <TimingRow label="Download" ms={req.timing.downloadMs} />
+            <TimingRow label="Total" ms={req.timing.totalMs} strong />
+          </div>
+        </div>
+      )}
+
+      <HeaderBlock title="Request headers" headers={req.requestHeaders} />
+      <HeaderBlock title="Response headers" headers={req.responseHeaders} />
+
+      {req.bodyPreview != null && (
+        <div>
+          <div className="mb-1 font-semibold uppercase tracking-wider text-muted">
+            Response body{req.bodyTruncated ? " (truncated)" : ""}
+          </div>
+          <pre className="max-h-72 overflow-auto rounded border bg-panel-2 p-2 text-[11px] leading-relaxed text-foreground">
+            {req.bodyPreview}
+          </pre>
+        </div>
+      )}
+      {req.bodyPreview == null && req.bodyTruncated && (
+        <p className="text-[11px] text-muted">Body was captured but dropped to keep the run small.</p>
+      )}
+    </div>
+  );
+}
+
+function Kv({ k, children }: { k: string; children: React.ReactNode }) {
+  return (
+    <div className="flex gap-2">
+      <span className="w-24 shrink-0 font-semibold uppercase tracking-wider text-muted">{k}</span>
+      <span className="min-w-0 text-foreground">{children}</span>
+    </div>
+  );
+}
+
+function TimingRow({ label, ms, strong }: { label: string; ms: number | null; strong?: boolean }) {
+  const width = ms != null ? Math.min(100, Math.max(2, ms / 20)) : 0;
+  return (
+    <div className="flex items-center gap-2">
+      <span className="w-24 shrink-0 text-muted">{label}</span>
+      <span className="h-2 w-40 overflow-hidden rounded bg-panel-2">
+        <span
+          className={`block h-full ${strong ? "bg-accent" : "bg-accent/50"}`}
+          style={{ width: `${width}%` }}
+        />
+      </span>
+      <span className={strong ? "text-foreground" : "text-muted"}>{ms != null ? `${ms} ms` : "—"}</span>
+    </div>
+  );
+}
+
+function HeaderBlock({ title, headers }: { title: string; headers: Record<string, string> }) {
+  const entries = Object.entries(headers ?? {});
+  if (entries.length === 0) return null;
+  return (
+    <div>
+      <div className="mb-1 font-semibold uppercase tracking-wider text-muted">{title}</div>
+      <div className="max-h-52 overflow-auto rounded border bg-panel-2">
+        <table className="w-full border-collapse font-mono text-[11px]">
+          <tbody>
+            {entries.map(([k, v]) => (
+              <tr key={k} className="border-t border-border first:border-t-0">
+                <td className="whitespace-nowrap p-1.5 pr-3 align-top text-muted">{k}</td>
+                <td className="break-all p-1.5 text-foreground">{v}</td>
               </tr>
             ))}
           </tbody>

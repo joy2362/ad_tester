@@ -1,16 +1,54 @@
 import { chromium } from "playwright-core";
-import type { Browser, BrowserContext, Request as PWRequest } from "playwright-core";
+import type {
+  Browser,
+  BrowserContext,
+  Request as PWRequest,
+  Response as PWResponse,
+} from "playwright-core";
 import { buildSandboxDocument, resolveInputType, SANDBOX_ORIGIN, SANDBOX_URL } from "./input";
-import { categorizeRequest, runHeuristics } from "./heuristics";
+import { buildPassbackReport, categorizeRequest, looksLikePassback, runHeuristics } from "./heuristics";
 import type {
   ConsoleMsg,
   CookieInfo,
   CreativeKind,
   InputMode,
   NetRequest,
+  NetTiming,
   RunOptions,
   RunResult,
 } from "./types";
+
+// Response-body capture budget — keeps the stored run JSON small.
+const MAX_BODY_PREVIEW = 12_000; // chars per response
+const MAX_TOTAL_BODY = 350_000; // chars across the whole run
+const MAX_BODIES = 60; // number of responses to read
+const BODYABLE = new Set(["document", "script", "xhr", "fetch", "sub_frame", "other", "eventsource"]);
+
+function timingBreakdown(t: ReturnType<PWRequest["timing"]> | null): NetTiming | null {
+  if (!t || t.responseEnd < 0) return null;
+  const nn = (v: number) => (v >= 0 ? Math.round(v) : null);
+  const span = (a: number, b: number) => (a >= 0 && b >= a ? Math.round(b - a) : null);
+  return {
+    dnsMs: span(t.domainLookupStart, t.domainLookupEnd),
+    connectMs: span(t.connectStart, t.connectEnd),
+    tlsMs: span(t.secureConnectionStart, t.connectEnd),
+    ttfbMs: span(t.requestStart, t.responseStart),
+    downloadMs: span(t.responseStart, t.responseEnd),
+    totalMs: nn(t.responseEnd),
+  };
+}
+
+async function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: NodeJS.Timeout;
+  const guard = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(fallback), ms);
+  });
+  try {
+    return await Promise.race([p, guard]);
+  } finally {
+    clearTimeout(timer!);
+  }
+}
 
 let browserPromise: Promise<Browser> | null = null;
 
@@ -83,7 +121,12 @@ export async function executeRun(
   const requestsByObj = new Map<PWRequest, NetRequest>();
   const consoleMessages: ConsoleMsg[] = [];
   const pageErrors: string[] = [];
+  const frameUrls = new Set<string>();
+  const popups: string[] = [];
+  const bodyReads: Promise<void>[] = [];
   let redirectCount = 0;
+  let totalBodyChars = 0;
+  let bodiesRead = 0;
 
   try {
     const browser = await getBrowser();
@@ -117,34 +160,99 @@ export async function executeRun(
     }
 
     const page = await context.newPage();
+    const mainFrame = page.mainFrame();
+
+    page.on("framenavigated", (frame) => {
+      if (frame === mainFrame) return;
+      const url = frame.url();
+      if (url && !url.startsWith("about:") && url !== SANDBOX_URL) frameUrls.add(url);
+    });
+
+    page.on("popup", async (popup) => {
+      const initial = popup.url() || "about:blank";
+      popups.push(initial);
+      try {
+        await popup.waitForLoadState("domcontentloaded", { timeout: 3000 });
+        const settled = popup.url();
+        if (settled && settled !== initial) popups[popups.length - 1] = settled;
+      } catch {
+        /* ignore */
+      }
+      await popup.close().catch(() => {});
+    });
 
     page.on("request", (req) => {
       if (req.url() === SANDBOX_URL) return;
+      const frame = req.frame();
+      const redirectChain: string[] = [];
+      let rf = req.redirectedFrom();
+      while (rf) {
+        redirectChain.unshift(rf.url());
+        rf = rf.redirectedFrom();
+      }
       requestsByObj.set(req, {
         url: req.url(),
         domain: hostOf(req.url()),
         method: req.method(),
         resourceType: req.resourceType(),
         status: null,
+        statusText: null,
         fromCache: false,
         bytes: 0,
+        bodyBytes: null,
         timeMs: null,
         thirdParty: isThirdParty(req.url()),
         isRedirect: false,
+        isSubframe: Boolean(frame) && frame !== mainFrame,
+        frameUrl: frame && frame !== mainFrame ? frame.url() || null : null,
+        redirectChain,
         failed: false,
         failureText: null,
         category: categorizeRequest(req.url(), req.resourceType()),
+        requestHeaders: req.headers(),
+        responseHeaders: {},
+        timing: null,
+        bodyPreview: null,
+        bodyTruncated: false,
+        passback: false,
       });
-      if (req.redirectedFrom()) redirectCount += 1;
+      if (redirectChain.length) redirectCount += 1;
     });
 
     page.on("response", (res) => {
       const entry = requestsByObj.get(res.request());
       if (!entry) return;
       entry.status = res.status();
+      entry.statusText = res.statusText() || null;
+      entry.responseHeaders = res.headers();
       if (res.status() >= 300 && res.status() < 400) entry.isRedirect = true;
-      entry.fromCache = res.fromServiceWorker() === false && (res.request().timing().responseStart < 0);
+      entry.fromCache = res.fromServiceWorker() === false && res.request().timing().responseStart < 0;
+      maybeCaptureBody(entry, res);
     });
+
+    function maybeCaptureBody(entry: NetRequest, res: PWResponse) {
+      const scanOnly = !options.captureBodies;
+      if (entry.isRedirect) return;
+      if (!BODYABLE.has(entry.resourceType)) return;
+      if (bodiesRead >= MAX_BODIES || totalBodyChars >= MAX_TOTAL_BODY) return;
+      bodiesRead += 1;
+      bodyReads.push(
+        withTimeout(res.body(), 2500, Buffer.alloc(0))
+          .then((buf) => {
+            if (!buf.length) return;
+            entry.bodyBytes = buf.length;
+            const text = buf.toString("utf8");
+            const pb = looksLikePassback(text, entry.domain, entry.status);
+            if (pb.hit) entry.passback = true;
+            if (scanOnly) return;
+            const room = Math.min(MAX_BODY_PREVIEW, MAX_TOTAL_BODY - totalBodyChars);
+            entry.bodyPreview = text.slice(0, room);
+            entry.bodyTruncated = text.length > entry.bodyPreview.length;
+            totalBodyChars += entry.bodyPreview.length;
+          })
+          .catch(() => {}),
+      );
+    }
 
     page.on("requestfailed", (req) => {
       const entry = requestsByObj.get(req);
@@ -166,6 +274,7 @@ export async function executeRun(
       if (timing && timing.responseEnd > 0 && timing.startTime >= 0) {
         entry.timeMs = Math.round(timing.responseEnd);
       }
+      entry.timing = timingBreakdown(timing);
     });
 
     page.on("console", (msg) => {
@@ -198,27 +307,42 @@ export async function executeRun(
     }
     await page.waitForTimeout(options.settleMs);
 
-    const domStats = await page
-      .evaluate(() => {
-        const container = document.getElementById("ad-tester-container");
-        const scope: ParentNode = container ?? document.body;
-        const kinds = new Set<string>();
-        const imgs = Array.from(scope.querySelectorAll("img")).filter(
-          (n) => (n as HTMLImageElement).currentSrc || n.getAttribute("src"),
-        );
-        if (imgs.length) kinds.add("image");
-        if (scope.querySelectorAll("video").length) kinds.add("video");
-        if (scope.querySelectorAll("iframe").length) kinds.add("iframe");
-        if (scope.querySelectorAll("canvas").length) kinds.add("canvas");
-        const text = (container?.textContent ?? "").replace(/\s+/g, " ").trim();
-        if (text.length > 12) kinds.add("text");
-        return {
-          domNodes: document.getElementsByTagName("*").length,
-          kinds: Array.from(kinds),
-          html: (container?.innerHTML ?? "").slice(0, 20000),
-        };
-      })
-      .catch(() => ({ domNodes: 0, kinds: [] as string[], html: null as string | null }));
+    // Drain any in-flight response-body reads (bounded by their own 2.5s guards).
+    await withTimeout(Promise.allSettled(bodyReads).then(() => undefined), 6000, undefined);
+
+    const emptyDom = { domNodes: 0, kinds: [] as string[], html: null as string | null };
+    const domStats = await withTimeout(
+      page
+        .evaluate(() => {
+          const container = document.getElementById("ad-tester-container");
+          const scope: ParentNode = container ?? document.body;
+          const kinds = new Set<string>();
+          const imgs = Array.from(scope.querySelectorAll("img")).filter(
+            (n) => (n as HTMLImageElement).currentSrc || n.getAttribute("src"),
+          );
+          if (imgs.length) kinds.add("image");
+          if (scope.querySelectorAll("video").length) kinds.add("video");
+          if (scope.querySelectorAll("iframe").length) kinds.add("iframe");
+          if (scope.querySelectorAll("canvas").length) kinds.add("canvas");
+          const text = (container?.textContent ?? "").replace(/\s+/g, " ").trim();
+          if (text.length > 12) kinds.add("text");
+          return {
+            domNodes: document.getElementsByTagName("*").length,
+            kinds: Array.from(kinds),
+            html: (container?.innerHTML ?? "").slice(0, 20000),
+          };
+        })
+        .catch(() => emptyDom),
+      5000,
+      emptyDom,
+    );
+
+    // Nested frames that survived to the end (a passback usually renders in one).
+    for (const f of page.frames()) {
+      if (f === mainFrame) continue;
+      const u = f.url();
+      if (u && !u.startsWith("about:") && u !== SANDBOX_URL) frameUrls.add(u);
+    }
 
     let screenshot: string | null = null;
     try {
@@ -251,6 +375,8 @@ export async function executeRun(
     const consoleErrorCount = consoleMessages.filter((m) => m.type === "error").length;
 
     const durationMs = Date.now() - started;
+    const frames = Array.from(frameUrls);
+    const passback = buildPassbackReport(requests, consoleMessages);
 
     const checks = runHeuristics({
       requests,
@@ -262,6 +388,7 @@ export async function executeRun(
       totalBytes,
       redirectCount,
       rawScript,
+      passback,
     });
 
     const result: RunResult = {
@@ -280,12 +407,18 @@ export async function executeRun(
         domNodes: domStats.domNodes,
         detectedCreative,
         insecureRequestCount,
+        frameCount: frames.length,
+        popupCount: popups.length,
+        passbackRequestCount: requests.filter((r) => r.passback).length,
       },
       requests,
       consoleMessages,
       pageErrors: navError ? [...pageErrors, `Navigation: ${navError}`] : pageErrors,
       cookies,
       checks,
+      frames,
+      popups,
+      passback,
     };
 
     return { status: "ok", error: navError, result };

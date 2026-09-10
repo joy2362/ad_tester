@@ -10,7 +10,7 @@ export default function Page() {
           <div>
             <h1 className="text-2xl font-bold tracking-tight">
               <span className="brand-gradient-text">ViewSense</span>{" "}
-              <span className="font-semibold text-muted">Ad Tester</span>
+              <span className="font-semibold text-muted">Ad Tag Taster</span>
             </h1>
             <p className="mt-1 text-sm text-muted">
               Paste an ad tag or script, run it in a real headless Chromium sandbox, and inspect every

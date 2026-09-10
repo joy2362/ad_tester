@@ -1,4 +1,11 @@
-import type { Check, ConsoleMsg, CookieInfo, CreativeKind, NetRequest } from "./types";
+import type {
+  Check,
+  ConsoleMsg,
+  CookieInfo,
+  CreativeKind,
+  NetRequest,
+  PassbackReport,
+} from "./types";
 
 // A small, non-exhaustive list of common ad-tech / tracking hosts.
 const KNOWN_TRACKER_HOSTS = [
@@ -74,6 +81,84 @@ interface HeuristicInput {
   totalBytes: number;
   redirectCount: number;
   rawScript: string;
+  passback: PassbackReport;
+}
+
+/* --------------------------- passback detection --------------------------- */
+
+const AD_HOST_HINT =
+  /(doubleclick|googlesyndication|googleadservices|adnxs|adsrvr|rubiconproject|pubmatic|casalemedia|criteo|amazon-adsystem|serving-sys|2mdn|smartadserver|openx|3lift|bidswitch|yieldmo|flashtalking|innovid|sizmek|adform|teads|spotx|springserve|freewheel|adtech|contextweb|gumgum|sharethrough|triplelift|indexexchange|adition|stroeer)/i;
+
+const NOFILL_RE =
+  /(\bno[\s_-]?fill\b|\bpassback\b|\bunfilled\b|\bno\s+ad(s)?\b|"adm"\s*:\s*""|"seatbid"\s*:\s*\[\s*\]|<VAST[^>]*>\s*<\/VAST>|<VAST[^>]*\/>|google_ads_iframe[^"]*__hidden__|dsp[_-]?nofill|status["']?\s*[:=]\s*["']?(204|no_?fill))/i;
+
+/**
+ * Does this response body look like a passback / no-fill — i.e. the ad source
+ * couldn't fill and either said so or handed back another tag to try?
+ */
+export function looksLikePassback(
+  bodyText: string,
+  requestHost: string,
+  status: number | null,
+): { hit: boolean; reason: string } {
+  const body = bodyText.slice(0, 20000);
+
+  if (NOFILL_RE.test(body)) return { hit: true, reason: "no-fill / passback marker in body" };
+
+  if ((status === 200 || status === 204) && body.trim().length === 0 && AD_HOST_HINT.test(requestHost)) {
+    return { hit: true, reason: `empty ${status} response from ${requestHost}` };
+  }
+
+  // Body is itself another ad tag pointing at a *different* ad host.
+  const srcMatch = body.match(/<script[^>]+src=["']?https?:\/\/([^"'/\s>]+)/i);
+  if (srcMatch && AD_HOST_HINT.test(srcMatch[1]) && !srcMatch[1].includes(requestHost)) {
+    return { hit: true, reason: `body loads a fallback tag from ${srcMatch[1]}` };
+  }
+  if (/document\.write\s*\(\s*['"`]?\s*<(script|iframe)/i.test(body) && AD_HOST_HINT.test(body)) {
+    return { hit: true, reason: "body document.write()s a fallback tag" };
+  }
+  return { hit: false, reason: "" };
+}
+
+export function buildPassbackReport(
+  requests: NetRequest[],
+  consoleMessages: ConsoleMsg[],
+): PassbackReport {
+  const signals: string[] = [];
+
+  const flagged = requests.filter((r) => r.passback);
+  for (const r of flagged) {
+    signals.push(`${r.domain || shortUrl(r.url)} returned a passback / no-fill`);
+  }
+
+  const nofillConsole = consoleMessages.filter((m) =>
+    /no[\s_-]?fill|passback|unfilled|no ad(s)? (to )?(serve|return|display)/i.test(m.text),
+  );
+  if (nofillConsole.length) {
+    signals.push(`console: "${nofillConsole[0].text.slice(0, 80)}"`);
+  }
+
+  // Ordered distinct ad hosts among script / document / sub-frame loads.
+  const chainDomains: string[] = [];
+  for (const r of requests) {
+    if (r.category !== "script" && r.category !== "document") continue;
+    if (!r.thirdParty || !AD_HOST_HINT.test(r.domain)) continue;
+    if (!chainDomains.includes(r.domain)) chainDomains.push(r.domain);
+  }
+  if (chainDomains.length >= 3) {
+    signals.push(`creative loaded through ${chainDomains.length} chained ad hosts`);
+  }
+
+  const status204 = requests.filter((r) => r.status === 204 && AD_HOST_HINT.test(r.domain));
+  for (const r of status204) {
+    if (!flagged.includes(r)) signals.push(`${r.domain} answered 204 (no content)`);
+  }
+
+  return {
+    detected: signals.length > 0,
+    signals: Array.from(new Set(signals)).slice(0, 8),
+    chainDomains,
+  };
 }
 
 const BYTE_BUDGET = 1_000_000; // 1 MB initial-load budget (IAB LEAN-ish)
@@ -92,6 +177,7 @@ export function runHeuristics(input: HeuristicInput): Check[] {
     totalBytes,
     redirectCount,
     rawScript,
+    passback,
   } = input;
 
   const insecure = requests.filter((r) => r.url.startsWith("http://"));
@@ -193,14 +279,44 @@ export function runHeuristics(input: HeuristicInput): Check[] {
       : "No document.write() in the pasted tag.",
   });
 
+  const renderedSomething = detectedCreative.length > 0 && !detectedCreative.includes("unknown");
   checks.push({
     id: "creative-rendered",
     label: "Creative rendered something",
-    status: detectedCreative.length && !detectedCreative.includes("unknown") ? "pass" : detectedCreative.length ? "info" : "warn",
+    status: renderedSomething ? "pass" : detectedCreative.length ? "info" : "warn",
     detail: detectedCreative.length
       ? `Detected: ${detectedCreative.join(", ")}.`
       : "No image, video, iframe, canvas or visible text was detected in the ad container.",
   });
+
+  if (passback.detected) {
+    // ERR_ABORTED on beacons (gen_204 etc.) is normal fire-and-forget behaviour,
+    // not a broken chain — only count "hard" failures.
+    const chainFailed = requests.some(
+      (r) =>
+        r.failed &&
+        AD_HOST_HINT.test(r.domain) &&
+        !/ABORTED/i.test(r.failureText ?? "") &&
+        !/[?&/]gen_204|[?&/]pcs\/|[?&/]activeview|[?&/]pagead\/(ping|adview)/i.test(r.url),
+    );
+    const through =
+      passback.chainDomains.length > 1 ? ` through ${passback.chainDomains.length} ad hosts` : "";
+    const signals = ` Signals: ${passback.signals.join("; ")}.`;
+
+    let status: Check["status"];
+    let detail: string;
+    if (renderedSomething && !chainFailed) {
+      status = "info";
+      detail = `The tag passed back${through} and a fallback creative still rendered — the sandbox followed the chain fine.${signals}`;
+    } else if (renderedSomething) {
+      status = "warn";
+      detail = `The tag passed back${through} and something rendered, but a request in the chain also failed — the fallback may be partial.${signals}`;
+    } else {
+      status = "warn";
+      detail = `A passback / no-fill was detected and no fallback creative was rendered — the backup source likely did not fill either.${signals}`;
+    }
+    checks.push({ id: "passback-handled", label: "Passback / no-fill handled", status, detail });
+  }
 
   return checks;
 }

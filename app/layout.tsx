@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Ad Tester · ViewSense",
+  title: "Ad Tag Taster · ViewSense",
   description: "Paste an ad tag, run it in a real headless browser, inspect what it does.",
 };
 

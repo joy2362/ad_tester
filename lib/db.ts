@@ -60,11 +60,26 @@ function createMemoryStore(): Store {
 
 function serialize(record: RunRecord): string {
   let json = JSON.stringify(record);
-  if (json.length > MAX_VALUE_BYTES && record.result?.screenshot) {
+  if (json.length > MAX_VALUE_BYTES && record.result) {
     // Drop the (large) screenshot rather than fail the whole write.
     json = JSON.stringify({
       ...record,
       result: { ...record.result, screenshot: null },
+    });
+  }
+  if (json.length > MAX_VALUE_BYTES && record.result) {
+    // Still too big — drop captured response bodies too.
+    json = JSON.stringify({
+      ...record,
+      result: {
+        ...record.result,
+        screenshot: null,
+        requests: record.result.requests.map((r) => ({
+          ...r,
+          bodyPreview: null,
+          bodyTruncated: r.bodyTruncated || Boolean(r.bodyPreview),
+        })),
+      },
     });
   }
   return json;
@@ -148,5 +163,6 @@ function summarize(record: RunRecord): RunSummary {
     failCheckCount: r?.checks.filter((c) => c.status === "fail").length ?? 0,
     warnCheckCount: r?.checks.filter((c) => c.status === "warn").length ?? 0,
     durationMs: r?.durationMs ?? 0,
+    passbackDetected: r?.passback?.detected ?? false,
   } satisfies RunSummary;
 }

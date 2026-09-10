@@ -29,5 +29,16 @@ cookies, console errors, redirects, weight, and the rendered creative. See `READ
   "Deploying to Vercel".
 - The sandbox origin `https://sandbox.ad-tester.local/` is fulfilled by a Playwright
   route, not real DNS.
+- Network capture is per-request detailed: req/res headers, `NetTiming` breakdown,
+  `redirectChain`, `isSubframe`/`frameUrl`, and a capped `bodyPreview` (budgets in
+  `lib/runner.ts`: `MAX_BODY_PREVIEW` / `MAX_TOTAL_BODY` / `MAX_BODIES`). The
+  `captureBodies` option only gates *preview storage* — bodies are still read+scanned
+  for passback signals when it's off.
+- Passback: `looksLikePassback()` scans response bodies, `buildPassbackReport()`
+  aggregates (both in `lib/heuristics.ts`); `RunResult.passback` + the `passback-handled`
+  check say whether a fallback creative rendered. `page.on("popup"|"framenavigated")`
+  feed `RunResult.popups` / `frames`.
+- Every post-goto await (`page.evaluate`, body drains, settle) is wrapped in
+  `withTimeout` so a passback loop can't hang the request.
 - After changing runner/heuristics, verify with: `POST /api/runs` via curl (see README),
   then `npx tsc --noEmit && npx eslint .`.
