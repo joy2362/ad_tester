@@ -1,7 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
-import { nanoid } from "nanoid";
 import { insertRun, listRuns } from "@/lib/db";
-import { executeRun } from "@/lib/runner";
 import { resolveInputType } from "@/lib/input";
 import { DEFAULT_OPTIONS, type InputMode, type RunOptions, type RunRecord } from "@/lib/types";
 
@@ -44,10 +43,22 @@ export async function POST(request: Request) {
 
   const options: RunOptions = normalizeOptions(input.options);
 
-  const outcome = await executeRun(script, mode, options);
+  // Import the Playwright runner lazily so a failure to load it (missing browser
+  // binary, bundling issue) surfaces as a JSON error rather than crashing the
+  // route module and 500ing every request including GET.
+  let outcome: Awaited<ReturnType<typeof import("@/lib/runner").executeRun>>;
+  try {
+    const { executeRun } = await import("@/lib/runner");
+    outcome = await executeRun(script, mode, options);
+  } catch (err) {
+    return NextResponse.json(
+      { error: `Could not start the headless browser: ${message(err)}` },
+      { status: 500 },
+    );
+  }
 
   const record: RunRecord = {
-    id: nanoid(12),
+    id: randomUUID().slice(0, 12),
     createdAt: Date.now(),
     label,
     script,

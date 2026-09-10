@@ -1,16 +1,17 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // `redis` (node-redis) uses conditional exports / dynamic requires that the
-  // server bundler can mangle — keep it external so it's require()d from
-  // node_modules at runtime. playwright-core / @sparticuz/chromium are already
-  // in Next's built-in external list.
-  serverExternalPackages: ["redis"],
-  // Make sure the @sparticuz/chromium binary pack is traced into the API
-  // route's serverless function bundle on Vercel (the file tracer misses the
-  // .br blobs otherwise).
+  // Keep these external (require()d from node_modules at runtime) rather than
+  // bundled — `redis`, `playwright-core` and `@sparticuz/chromium` all use
+  // conditional exports / dynamic requires the server bundler mangles.
+  serverExternalPackages: ["redis", "playwright-core", "@sparticuz/chromium"],
+  // Force the browser packages (incl. the @sparticuz/chromium .br binary blobs,
+  // which the tracer misses) into the API route's function bundle on Vercel.
   outputFileTracingIncludes: {
-    "/api/**": ["./node_modules/@sparticuz/chromium/**"],
+    "/api/**": [
+      "./node_modules/@sparticuz/chromium/**",
+      "./node_modules/playwright-core/**",
+    ],
   },
 };
 
