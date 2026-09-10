@@ -50,50 +50,41 @@ async function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T
   }
 }
 
-// One shared browser per mode — stealth needs different launch flags.
-const browserPromises: Record<"normal" | "stealth", Promise<Browser> | null> = {
-  normal: null,
-  stealth: null,
-};
+let browserPromise: Promise<Browser> | null = null;
 
 // Vercel / AWS Lambda: no bundled Chromium and a read-only FS, so use the
 // Lambda-sized build from @sparticuz/chromium. Locally we fall through to the
 // browser that @playwright/browser-chromium downloaded on install.
 const isServerless = Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.VERCEL);
 
-// Drops the `navigator.webdriver` flag and the "automation" infobar so the
-// browser reports like a normal Chrome (webdriver === false, not true).
-const STEALTH_ARGS = [
-  "--disable-blink-features=AutomationControlled",
-  "--disable-features=IsolateOrigins",
-];
-
-async function launchBrowser(stealth: boolean): Promise<Browser> {
-  const extra = stealth ? STEALTH_ARGS : [];
+// One shared browser, launched plain. Stealth is applied entirely per-context
+// (UA, headers, init script) so it never needs a second cold-start browser —
+// which on a 1 GB / 60 s Vercel function is the difference between a run and a
+// FUNCTION_INVOCATION_TIMEOUT.
+async function launchBrowser(): Promise<Browser> {
   if (isServerless) {
     const { default: sparticuz } = await import("@sparticuz/chromium");
     sparticuz.setGraphicsMode = false;
     return chromium.launch({
       executablePath: await sparticuz.executablePath(),
-      args: [...sparticuz.args, ...extra],
+      args: sparticuz.args,
       headless: true,
     });
   }
-  return chromium.launch({ headless: true, args: extra });
+  return chromium.launch({ headless: true });
 }
 
-async function getBrowser(stealth: boolean): Promise<Browser> {
-  const key = stealth ? "stealth" : "normal";
-  if (!browserPromises[key]) {
-    browserPromises[key] = launchBrowser(stealth).catch((err) => {
-      browserPromises[key] = null;
+async function getBrowser(): Promise<Browser> {
+  if (!browserPromise) {
+    browserPromise = launchBrowser().catch((err) => {
+      browserPromise = null;
       throw err;
     });
   }
-  const browser = await browserPromises[key]!;
+  const browser = await browserPromise;
   if (!browser.isConnected()) {
-    browserPromises[key] = null;
-    return getBrowser(stealth);
+    browserPromise = null;
+    return getBrowser();
   }
   return browser;
 }
@@ -112,6 +103,10 @@ const STEALTH_HEADERS: Record<string, string> = {
 // (including ViewSense's own IVT check: webdriver / fake_chrome / no_plugins).
 const STEALTH_INIT = `(() => {
   const def = (obj, prop, get) => { try { Object.defineProperty(obj, prop, { get, configurable: true }); } catch (e) {} };
+
+  // Real (non-automated) Chrome reports navigator.webdriver === false.
+  def(navigator, 'webdriver', () => false);
+  try { delete Navigator.prototype.webdriver; } catch (e) {}
 
   if (!window.chrome) {
     window.chrome = { runtime: {}, app: { isInstalled: false }, csi: function () {}, loadTimes: function () {} };
@@ -233,7 +228,7 @@ export async function executeRun(
   let bodiesRead = 0;
 
   try {
-    const browser = await getBrowser(options.stealth);
+    const browser = await getBrowser();
     context = await browser.newContext({
       viewport: { width: options.viewportWidth, height: options.viewportHeight },
       userAgent: options.stealth
