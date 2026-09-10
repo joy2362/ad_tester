@@ -75,6 +75,13 @@ Open http://localhost:3000.
 - Popups a tag opens are recorded and closed; their own sub-requests aren't traced.
 - `blockThirdParty` (advanced options) aborts every non-sandbox request — useful for an
   isolation / offline-behavior test.
+- `stealth` (advanced options) masks the headless tells an ad server's invalid-traffic
+  (IVT) filter keys on: `navigator.webdriver`, the UA / `Sec-CH-UA` / `userAgentData`
+  brands, `navigator.plugins`/`mimeTypes`, `window.chrome`, WebGL vendor/renderer,
+  `outerWidth/Height`, locale + timezone. Applied per browser context (no extra
+  browser launch). Note it can't change the **egress IP** — ad servers commonly drop
+  fills from datacenter ranges (Vercel included) regardless of the browser fingerprint,
+  so a masked run may still get a no-fill when deployed.
 ## Deploying to Vercel
 
 The `/api/runs` function launches a real browser, so it needs the serverless

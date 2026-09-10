@@ -41,5 +41,10 @@ cookies, console errors, redirects, weight, and the rendered creative. See `READ
   feed `RunResult.popups` / `frames`.
 - Every post-goto await (`page.evaluate`, body drains, settle) is wrapped in
   `withTimeout` so a passback loop can't hang the request.
+- `RunOptions.stealth` masks headless tells (webdriver / UA / Sec-CH-UA /
+  userAgentData / plugins / WebGL / chrome / outerWidth). ALL per-context
+  (`STEALTH_UA` + `STEALTH_HEADERS` + `STEALTH_INIT` addInitScript) — deliberately
+  no per-mode browser: a second cold-start Chromium on a 1 GB / 60 s Vercel
+  function = FUNCTION_INVOCATION_TIMEOUT. It cannot change the egress IP.
 - After changing runner/heuristics, verify with: `POST /api/runs` via curl (see README),
   then `npx tsc --noEmit && npx eslint .`.
