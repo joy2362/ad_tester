@@ -107,29 +107,12 @@ export default function ResultView({
           <Overview record={record} failCount={failCount} warnCount={warnCount} previous={previous} />
         )}
         {tab === "preview" && (
-          <div className="flex flex-col gap-4">
-            {r.screenshot ? (
-              <figure className="rounded-lg border bg-panel-2 p-3">
-                <figcaption className="mb-2 text-[11px] text-muted">
-                  Headless screenshot ({record.options.viewportWidth}×{record.options.viewportHeight})
-                </figcaption>
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={r.screenshot}
-                  alt="Ad screenshot"
-                  className="max-w-full rounded border"
-                />
-              </figure>
-            ) : (
-              <p className="text-sm text-muted">No screenshot captured.</p>
-            )}
-            <SandboxPreview
-              script={record.script}
-              mode={record.inputMode}
-              width={record.options.viewportWidth}
-              height={record.options.viewportHeight}
-            />
-          </div>
+          <SandboxPreview
+            script={record.script}
+            mode={record.inputMode}
+            width={record.options.viewportWidth}
+            height={record.options.viewportHeight}
+          />
         )}
         {tab === "network" && <NetworkTable requests={r.requests} />}
         {tab === "console" && (
