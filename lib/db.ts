@@ -1,4 +1,4 @@
-import { createClient, type RedisClientType } from "redis";
+import type { RedisClientType } from "redis";
 import type { RunRecord, RunSummary } from "./types";
 
 /**
@@ -95,12 +95,35 @@ function createRedisStore(url: string): Store {
 
   async function client(): Promise<RedisClientType> {
     if (!clientPromise) {
-      const c: RedisClientType = createClient({ url });
-      c.on("error", (err) => console.error("redis client error:", err));
-      clientPromise = c.connect().then(() => c).catch((err) => {
-        clientPromise = null;
-        throw err;
-      });
+      // Dynamic import so the `redis` package is never needed at route
+      // module-load time — a bundling/resolution miss degrades to a caught
+      // runtime error instead of crashing the whole function.
+      clientPromise = import("redis")
+        .then(async ({ createClient }) => {
+          const c = createClient({
+            url,
+            // Fail fast: bound the initial connect and give up after a few
+            // retries instead of blocking the request until the function times out.
+            socket: {
+              connectTimeout: 4000,
+              reconnectStrategy: (retries) => (retries > 3 ? false : Math.min(retries * 200, 800)),
+            },
+          }) as RedisClientType;
+          c.on("error", (err) => console.error("redis client error:", err));
+          const connecting = c.connect();
+          connecting.catch(() => {}); // avoid an unhandled rejection if the race times out first
+          await Promise.race([
+            connecting,
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error("redis connect timed out")), 5000),
+            ),
+          ]);
+          return c;
+        })
+        .catch((err) => {
+          clientPromise = null;
+          throw err;
+        });
     }
     return clientPromise;
   }
@@ -135,32 +158,49 @@ function createRedisStore(url: string): Store {
 
 /* -------------------------------- selection ----------------------------- */
 
-let store: Store;
+const fallback = createMemoryStore();
+let primary: Store;
 try {
-  store = redisUrl ? createRedisStore(redisUrl) : createMemoryStore();
+  primary = redisUrl ? createRedisStore(redisUrl) : fallback;
 } catch (err) {
-  console.error("Redis store init failed, falling back to memory:", err);
-  store = createMemoryStore();
+  console.error("Redis store init failed, using memory:", err);
+  primary = fallback;
 }
 
-export const storeKind = store.kind;
+export const storeKind = primary.kind;
+
+// If a Redis op throws (bad URL, TLS, network, package resolution), don't 500 the
+// request — log once and serve from the in-process store instead.
+let redisBroken = false;
+async function run<T>(op: (s: Store) => Promise<T>): Promise<T> {
+  if (primary === fallback || redisBroken) return op(fallback);
+  try {
+    return await op(primary);
+  } catch (err) {
+    if (!redisBroken) {
+      redisBroken = true;
+      console.error("Redis unavailable, falling back to in-memory store:", err);
+    }
+    return op(fallback);
+  }
+}
 
 /* --------------------------------- API --------------------------------- */
 
 export async function insertRun(record: RunRecord): Promise<void> {
-  await store.insert(record);
+  await run((s) => s.insert(record));
 }
 
 export async function getRun(id: string): Promise<RunRecord | null> {
-  return store.get(id);
+  return run((s) => s.get(id));
 }
 
 export async function deleteRun(id: string): Promise<boolean> {
-  return store.remove(id);
+  return run((s) => s.remove(id));
 }
 
 export async function listRuns(limit = 50): Promise<RunSummary[]> {
-  const records = await store.list(limit);
+  const records = await run((s) => s.list(limit));
   return records.map(summarize);
 }
 
