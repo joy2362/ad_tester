@@ -92,6 +92,7 @@ function normalizeOptions(raw: unknown): RunOptions {
     settleMs: num(o.settleMs, DEFAULT_OPTIONS.settleMs, 0, 15000),
     blockThirdParty: Boolean(o.blockThirdParty),
     captureBodies: o.captureBodies === undefined ? DEFAULT_OPTIONS.captureBodies : Boolean(o.captureBodies),
+    stealth: Boolean(o.stealth),
   };
 }
 

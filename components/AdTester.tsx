@@ -271,6 +271,18 @@ export default function AdTester({ initial = null }: Props) {
                 />
                 Capture request/response headers &amp; body previews
               </label>
+              <label className="col-span-2 flex items-start gap-2 text-muted">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={options.stealth}
+                  onChange={(e) => setOptions((o) => ({ ...o, stealth: e.target.checked }))}
+                />
+                <span>
+                  Stealth mode — mask headless / automation signals (<code>navigator.webdriver</code>,
+                  UA, plugins, WebGL, client hints) so ad servers that block bots will fill.
+                </span>
+              </label>
               <label className="col-span-2 flex items-center gap-2 text-muted">
                 <input
                   type="checkbox"

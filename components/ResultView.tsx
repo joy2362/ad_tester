@@ -73,6 +73,9 @@ export default function ResultView({
           <span className="rounded bg-panel-2 px-1.5 py-0.5 text-[11px] text-muted">
             {record.resolvedType}
           </span>
+          {record.options?.stealth && (
+            <span className="rounded bg-accent/15 px-1.5 py-0.5 text-[11px] text-accent">stealth</span>
+          )}
         </div>
         <span className="text-xs text-muted">
           {new Date(record.createdAt).toLocaleString()} · {(r.durationMs / 1000).toFixed(1)}s ·{" "}

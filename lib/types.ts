@@ -110,6 +110,7 @@ export interface RunOptions {
   settleMs: number;
   blockThirdParty: boolean;
   captureBodies: boolean;
+  stealth: boolean;
 }
 
 export interface RunRecord {
@@ -148,4 +149,5 @@ export const DEFAULT_OPTIONS: RunOptions = {
   settleMs: 2500,
   blockThirdParty: false,
   captureBodies: true,
+  stealth: false,
 };
