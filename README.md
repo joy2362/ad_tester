@@ -10,7 +10,7 @@ weight, and the rendered creative.
 - **Playwright / Chromium** drives the headless run — `playwright-core` plus
   `@playwright/browser-chromium` locally (downloaded on install) and
   `@sparticuz/chromium` on Vercel / Lambda (`isServerless` switch in `lib/runner.ts`)
-- **Run history**: Upstash Redis (`@upstash/redis`) when configured, else an
+- **Run history**: Redis via `node-redis` when `REDIS_URL` is set, else an
   in-process map (ephemeral). See `lib/db.ts`.
 
 ## Run it
@@ -55,7 +55,7 @@ Open http://localhost:3000.
 | `lib/input.ts` | input classification + sandbox HTML builder |
 | `lib/runner.ts` | Playwright execution + capture (server-only) |
 | `lib/heuristics.ts` | request categorization + checks |
-| `lib/db.ts` | run store (Upstash Redis or in-memory) |
+| `lib/db.ts` | run store (Redis via `node-redis`, or in-memory) |
 | `app/api/runs/route.ts` | `GET` list, `POST` run |
 | `app/api/runs/[id]/route.ts` | `GET` one, `DELETE` |
 | `components/AdTester.tsx` | form + history (client) |
@@ -84,21 +84,19 @@ build of Chromium and an off-disk store:
    when `VERCEL` / `AWS_LAMBDA_FUNCTION_NAME` is set; `next.config.ts`
    (`outputFileTracingIncludes`) bundles its binary into the function;
    `vercel.json` gives the function 1024 MB and a 60 s `maxDuration`.
-2. **Run history** — add the **Upstash for Redis** integration from the Vercel
-   project's Storage tab. It injects `UPSTASH_REDIS_REST_URL` /
-   `UPSTASH_REDIS_REST_TOKEN` (`KV_REST_API_*` also accepted) and `lib/db.ts`
-   picks them up automatically. Without it the app still runs, but history is
-   per-instance and disappears on cold starts.
-3. Redeploy.
+2. **Run history** — Storage tab → create/connect a **Redis** store to the
+   project (Production + Preview). Vercel injects `REDIS_URL`; `lib/db.ts`
+   connects with `node-redis` automatically. Without it the app still runs, but
+   history is per-instance and disappears on cold starts.
+3. Redeploy (env vars only take effect on new deployments).
 
 Caveats: cold starts add ~2–4 s (Chromium extraction to `/tmp`); heavy tags can
 still hit the 60 s Hobby ceiling — raise `maxDuration`/`memory` in `vercel.json`
-on Pro. `screenshot` JPEG quality is 55 and run JSON is capped at ~1 MB (the
-screenshot is dropped past that) to stay under Upstash's free per-request limit.
+on Pro. `screenshot` JPEG quality is 55 and each run record is capped at ~1 MB
+(screenshot then body previews are dropped past that).
 
 ### Other hosts
 
 Any Node host or a container on `mcr.microsoft.com/playwright` also works — there
-`isServerless` is false and the locally-downloaded Chromium is used. Point
-`UPSTASH_REDIS_REST_URL`/`_TOKEN` at any Redis-compatible store, or leave unset
-for in-memory.
+`isServerless` is false and the locally-downloaded Chromium is used. Set
+`REDIS_URL` to any Redis connection string, or leave it unset for in-memory.

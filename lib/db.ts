@@ -1,27 +1,26 @@
-import { Redis } from "@upstash/redis";
+import { createClient, type RedisClientType } from "redis";
 import type { RunRecord, RunSummary } from "./types";
 
 /**
  * Run persistence.
  *
- * Serverless (Vercel) has a read-only filesystem, so the old better-sqlite3 file
- * store is gone. If Upstash Redis credentials are present we use those; otherwise
- * we fall back to an in-process Map (fine for local dev / a quick demo, but
- * ephemeral — a warm Vercel instance keeps it, a cold one starts empty).
+ * Serverless (Vercel) has a read-only filesystem, so there is no on-disk store.
+ * If a Redis connection string is present (Vercel-managed Redis injects
+ * `REDIS_URL`; the old Vercel KV used `KV_URL`) we persist there via node-redis;
+ * otherwise we fall back to an in-process Map — fine for local dev / a quick
+ * demo, but ephemeral (a warm instance keeps it, a cold one starts empty).
  *
- * Add persistence on Vercel by attaching the "Upstash for Redis" integration
- * (Storage tab) — it injects UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN
- * (KV_REST_API_URL / KV_REST_API_TOKEN also accepted). No redeploy of code needed.
+ * To enable persistence on Vercel: Storage → create/connect a Redis store to the
+ * project's Production + Preview environments, then redeploy. No code change.
  */
 
 const KEY_PREFIX = "adtester:run:";
 const INDEX_KEY = "adtester:runs:index";
 const MAX_RUNS = 200;
 const TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
-const MAX_VALUE_BYTES = 1_000_000; // Upstash free-tier per-request ceiling
+const MAX_VALUE_BYTES = 1_000_000; // keep individual records lean
 
-const redisUrl = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
-const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
+const redisUrl = process.env.REDIS_URL || process.env.KV_URL || "";
 
 interface Store {
   kind: "redis" | "memory";
@@ -62,10 +61,7 @@ function serialize(record: RunRecord): string {
   let json = JSON.stringify(record);
   if (json.length > MAX_VALUE_BYTES && record.result) {
     // Drop the (large) screenshot rather than fail the whole write.
-    json = JSON.stringify({
-      ...record,
-      result: { ...record.result, screenshot: null },
-    });
+    json = JSON.stringify({ ...record, result: { ...record.result, screenshot: null } });
   }
   if (json.length > MAX_VALUE_BYTES && record.result) {
     // Still too big — drop captured response bodies too.
@@ -85,34 +81,54 @@ function serialize(record: RunRecord): string {
   return json;
 }
 
-function createRedisStore(url: string, token: string): Store {
-  const redis = new Redis({ url, token });
+function parse(raw: string | null): RunRecord | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as RunRecord;
+  } catch {
+    return null;
+  }
+}
+
+function createRedisStore(url: string): Store {
+  let clientPromise: Promise<RedisClientType> | null = null;
+
+  async function client(): Promise<RedisClientType> {
+    if (!clientPromise) {
+      const c: RedisClientType = createClient({ url });
+      c.on("error", (err) => console.error("redis client error:", err));
+      clientPromise = c.connect().then(() => c).catch((err) => {
+        clientPromise = null;
+        throw err;
+      });
+    }
+    return clientPromise;
+  }
 
   return {
     kind: "redis",
     async insert(record) {
-      await redis.set(KEY_PREFIX + record.id, serialize(record), { ex: TTL_SECONDS });
-      await redis.zadd(INDEX_KEY, { score: record.createdAt, member: record.id });
-      // Trim the index to the most recent MAX_RUNS ids.
-      await redis.zremrangebyrank(INDEX_KEY, 0, -(MAX_RUNS + 1));
+      const c = await client();
+      await c.set(KEY_PREFIX + record.id, serialize(record), { EX: TTL_SECONDS });
+      await c.zAdd(INDEX_KEY, { score: record.createdAt, value: record.id });
+      await c.zRemRangeByRank(INDEX_KEY, 0, -(MAX_RUNS + 1));
     },
     async get(id) {
-      const raw = await redis.get<RunRecord | string>(KEY_PREFIX + id);
-      if (!raw) return null;
-      return typeof raw === "string" ? (JSON.parse(raw) as RunRecord) : raw;
+      const c = await client();
+      return parse(await c.get(KEY_PREFIX + id));
     },
     async remove(id) {
-      const removed = await redis.del(KEY_PREFIX + id);
-      await redis.zrem(INDEX_KEY, id);
+      const c = await client();
+      const removed = await c.del(KEY_PREFIX + id);
+      await c.zRem(INDEX_KEY, id);
       return removed > 0;
     },
     async list(limit) {
-      const ids = await redis.zrange<string[]>(INDEX_KEY, 0, limit - 1, { rev: true });
+      const c = await client();
+      const ids = await c.zRange(INDEX_KEY, 0, limit - 1, { REV: true });
       if (!ids.length) return [];
-      const raws = await redis.mget<(RunRecord | string)[]>(...ids.map((id) => KEY_PREFIX + id));
-      return raws
-        .map((raw) => (typeof raw === "string" ? (JSON.parse(raw) as RunRecord) : raw))
-        .filter((r): r is RunRecord => Boolean(r));
+      const raws = await c.mGet(ids.map((id) => KEY_PREFIX + id));
+      return raws.map(parse).filter((r): r is RunRecord => Boolean(r));
     },
   };
 }
@@ -121,7 +137,7 @@ function createRedisStore(url: string, token: string): Store {
 
 let store: Store;
 try {
-  store = redisUrl && redisToken ? createRedisStore(redisUrl, redisToken) : createMemoryStore();
+  store = redisUrl ? createRedisStore(redisUrl) : createMemoryStore();
 } catch (err) {
   console.error("Redis store init failed, falling back to memory:", err);
   store = createMemoryStore();

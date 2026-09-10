@@ -20,10 +20,11 @@ cookies, console errors, redirects, weight, and the rendered creative. See `READ
   its own `BrowserContext`, closed in `finally`. `isServerless` (VERCEL /
   AWS_LAMBDA_FUNCTION_NAME) switches the launch to `@sparticuz/chromium`; otherwise the
   browser from `@playwright/browser-chromium` (a devDependency) is used.
-- Run history lives in `lib/db.ts` (still named db) — Upstash Redis when
-  `UPSTASH_REDIS_REST_URL`/`_TOKEN` (or `KV_REST_API_*`) are set, else an in-process
-  Map. The exported fns are **async**. Screenshots are inline base64 JPEG data URLs;
-  a record over ~1 MB is stored with `screenshot` nulled.
+- Run history lives in `lib/db.ts` (still named db) — Redis via `node-redis` when
+  `REDIS_URL` (or `KV_URL`) is set, else an in-process Map. Redis client is a lazily
+  connected singleton. The exported fns are **async**. Screenshots are inline base64
+  JPEG data URLs; a record over ~1 MB is stored with `screenshot` nulled, then body
+  previews stripped.
 - Vercel bits: `vercel.json` (function memory/duration) + `next.config.ts`
   `outputFileTracingIncludes` (bundles the `@sparticuz/chromium` binary). See README
   "Deploying to Vercel".
