@@ -58,6 +58,37 @@ export async function getBrowser(): Promise<Browser> {
   return browser;
 }
 
+/** Drop the cached browser so the next getBrowser() launches a fresh one. */
+export function resetBrowser(): void {
+  browserPromise = null;
+}
+
+function isDeadBrowserError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /has been closed|disconnected|target (page|context or browser) .*closed/i.test(msg);
+}
+
+/**
+ * Runs `fn` against the shared browser. Vercel can freeze/reap a function
+ * instance's child processes between invocations while the warm Node module
+ * still holds a reference to the (now-dead) Browser object — `isConnected()`
+ * can pass right before a call fails with e.g. "browserContext.newPage:
+ * Target page, context or browser has been closed". On that specific failure,
+ * reset the singleton and retry once with a freshly launched browser; any
+ * other error (a real page/tag problem) is not retried.
+ */
+export async function withBrowser<T>(fn: (browser: Browser) => Promise<T>): Promise<T> {
+  const browser = await getBrowser();
+  try {
+    return await fn(browser);
+  } catch (err) {
+    if (!isDeadBrowserError(err)) throw err;
+    resetBrowser();
+    const fresh = await getBrowser();
+    return fn(fresh);
+  }
+}
+
 export const DEFAULT_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 

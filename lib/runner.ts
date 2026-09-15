@@ -1,5 +1,5 @@
-import type { BrowserContext, Request as PWRequest, Response as PWResponse } from "playwright-core";
-import { DEFAULT_UA, STEALTH_HEADERS, STEALTH_INIT, STEALTH_UA, getBrowser, withTimeout } from "./browser";
+import type { BrowserContext, Page, Request as PWRequest, Response as PWResponse } from "playwright-core";
+import { DEFAULT_UA, STEALTH_HEADERS, STEALTH_INIT, STEALTH_UA, withBrowser, withTimeout } from "./browser";
 import { buildSandboxDocument, resolveInputType, SANDBOX_ORIGIN, SANDBOX_URL } from "./input";
 import { buildPassbackReport, categorizeRequest, looksLikePassback, runHeuristics } from "./heuristics";
 import type {
@@ -77,40 +77,46 @@ export async function executeRun(
   let bodiesRead = 0;
 
   try {
-    const browser = await getBrowser();
-    context = await browser.newContext({
-      viewport: { width: options.viewportWidth, height: options.viewportHeight },
-      userAgent: options.stealth ? STEALTH_UA : DEFAULT_UA,
-      ...(options.stealth
-        ? { locale: "en-US", timezoneId: "America/New_York", extraHTTPHeaders: STEALTH_HEADERS }
-        : {}),
-      serviceWorkers: "block",
-      bypassCSP: true,
-    });
-    context.setDefaultTimeout(options.timeoutMs);
-    if (options.stealth) await context.addInitScript(STEALTH_INIT);
+    // withBrowser retries once with a freshly launched browser if the shared
+    // singleton died between serverless invocations (see lib/browser.ts).
+    const opened = await withBrowser(async (browser) => {
+      const ctx = await browser.newContext({
+        viewport: { width: options.viewportWidth, height: options.viewportHeight },
+        userAgent: options.stealth ? STEALTH_UA : DEFAULT_UA,
+        ...(options.stealth
+          ? { locale: "en-US", timezoneId: "America/New_York", extraHTTPHeaders: STEALTH_HEADERS }
+          : {}),
+        serviceWorkers: "block",
+        bypassCSP: true,
+      });
+      ctx.setDefaultTimeout(options.timeoutMs);
+      if (options.stealth) await ctx.addInitScript(STEALTH_INIT);
 
-    // Serve the sandbox document for the first navigation.
-    await context.route(`${SANDBOX_ORIGIN}/**`, async (route) => {
-      if (route.request().url() === SANDBOX_URL) {
-        await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: doc });
-        return;
-      }
-      await route.continue();
-    });
-
-    if (options.blockThirdParty) {
-      await context.route("**/*", async (route) => {
-        const url = route.request().url();
-        if (url.startsWith(SANDBOX_ORIGIN) || url.startsWith("data:") || url.startsWith("blob:")) {
-          await route.continue();
+      // Serve the sandbox document for the first navigation.
+      await ctx.route(`${SANDBOX_ORIGIN}/**`, async (route) => {
+        if (route.request().url() === SANDBOX_URL) {
+          await route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: doc });
           return;
         }
-        await route.abort("blockedbyclient");
+        await route.continue();
       });
-    }
 
-    const page = await context.newPage();
+      if (options.blockThirdParty) {
+        await ctx.route("**/*", async (route) => {
+          const url = route.request().url();
+          if (url.startsWith(SANDBOX_ORIGIN) || url.startsWith("data:") || url.startsWith("blob:")) {
+            await route.continue();
+            return;
+          }
+          await route.abort("blockedbyclient");
+        });
+      }
+
+      const pg = await ctx.newPage();
+      return { ctx, pg };
+    });
+    context = opened.ctx;
+    const page: Page = opened.pg;
     const mainFrame = page.mainFrame();
 
     page.on("framenavigated", (frame) => {

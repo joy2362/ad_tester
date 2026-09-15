@@ -1,8 +1,8 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { BrowserContext } from "playwright-core";
-import { DEFAULT_UA, STEALTH_HEADERS, STEALTH_INIT, STEALTH_UA, getBrowser, withTimeout } from "./browser";
+import type { BrowserContext, Page } from "playwright-core";
+import { DEFAULT_UA, STEALTH_HEADERS, STEALTH_INIT, STEALTH_UA, withBrowser, withTimeout } from "./browser";
 import type { SiteCheckOptions, SitePageInput, SitePageResult } from "./types";
 
 // Keep an inline video small: cap what we'll base64-embed in the response.
@@ -56,26 +56,30 @@ export async function checkSitePage(
   let videoDir: string | null = null;
 
   try {
-    const browser = await getBrowser();
-
     if (options.recordVideo) {
       videoDir = await fs.mkdtemp(path.join(os.tmpdir(), "adtester-video-"));
     }
 
-    context = await browser.newContext({
-      viewport: { width: options.viewportWidth, height: options.viewportHeight },
-      userAgent: options.stealth ? STEALTH_UA : DEFAULT_UA,
-      ...(options.stealth
-        ? { locale: "en-US", timezoneId: "America/New_York", extraHTTPHeaders: STEALTH_HEADERS }
-        : {}),
-      ...(videoDir
-        ? { recordVideo: { dir: videoDir, size: { width: options.viewportWidth, height: options.viewportHeight } } }
-        : {}),
+    // withBrowser retries once with a freshly launched browser if the shared
+    // singleton died between serverless invocations (see lib/browser.ts).
+    const opened = await withBrowser(async (browser) => {
+      const ctx = await browser.newContext({
+        viewport: { width: options.viewportWidth, height: options.viewportHeight },
+        userAgent: options.stealth ? STEALTH_UA : DEFAULT_UA,
+        ...(options.stealth
+          ? { locale: "en-US", timezoneId: "America/New_York", extraHTTPHeaders: STEALTH_HEADERS }
+          : {}),
+        ...(videoDir
+          ? { recordVideo: { dir: videoDir, size: { width: options.viewportWidth, height: options.viewportHeight } } }
+          : {}),
+      });
+      ctx.setDefaultTimeout(options.timeoutMs);
+      if (options.stealth) await ctx.addInitScript(STEALTH_INIT);
+      const pg = await ctx.newPage();
+      return { ctx, pg };
     });
-    context.setDefaultTimeout(options.timeoutMs);
-    if (options.stealth) await context.addInitScript(STEALTH_INIT);
-
-    const page = await context.newPage();
+    context = opened.ctx;
+    const page: Page = opened.pg;
 
     let navError: string | null = null;
     try {
