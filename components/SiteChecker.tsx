@@ -31,7 +31,14 @@ function parseBulk(text: string): SitePageInput[] {
   for (const raw of text.split("\n")) {
     const line = raw.trim();
     if (!line) continue;
-    const parts = line.split("|").map((p) => p.trim());
+    let parts = line.split("|").map((p) => p.trim());
+    // Trailing "| auto" / "| home" flags the row as "visit this as a home
+    // page and pick an article off it" instead of a direct URL.
+    let autoDiscoverArticle = false;
+    if (parts.length > 1 && /^(auto|home)$/i.test(parts[parts.length - 1])) {
+      autoDiscoverArticle = true;
+      parts = parts.slice(0, -1);
+    }
     let portal = "";
     let pageLabel = "Page";
     let url = "";
@@ -48,7 +55,8 @@ function parseBulk(text: string): SitePageInput[] {
       }
     }
     if (!url) continue;
-    rows.push({ id: newId(), portal, pageLabel: pageLabel || "Page", url });
+    if (autoDiscoverArticle && pageLabel === "Page") pageLabel = "Article page";
+    rows.push({ id: newId(), portal, pageLabel: pageLabel || "Page", url, autoDiscoverArticle });
   }
   return rows;
 }
@@ -261,13 +269,22 @@ export default function SiteChecker() {
               {showBulk ? "hide bulk add" : "bulk add"}
             </button>
           </div>
+          <p className="mb-2 text-[11px] text-muted">
+            🔗 = direct URL · 🏠→📄 = visit as a home page and check whichever article it
+            picks (click the icon to switch a row).
+          </p>
 
           {showBulk && (
             <div className="mb-3 rounded-md border bg-panel-2 p-2">
               <textarea
                 value={bulkText}
                 onChange={(e) => setBulkText(e.target.value)}
-                placeholder={"One per line — Portal | Page label | URL\nThe Daily Times | Home page | https://example.com/\nThe Daily Times | Article page | https://example.com/some-article"}
+                placeholder={
+                  "One per line — Portal | Page label | URL (add \"| auto\" to pick an article off a home page URL)\n" +
+                  "The Daily Times | Home page | https://example.com/\n" +
+                  "The Daily Times | Article page | https://example.com/some-article\n" +
+                  "The Daily Times | Article page | https://example.com/ | auto"
+                }
                 spellCheck={false}
                 className="h-24 w-full resize-y rounded border bg-panel p-2 font-mono text-[11.5px] leading-relaxed outline-none focus:border-accent"
               />
@@ -315,9 +332,25 @@ export default function SiteChecker() {
                     <input
                       value={row.url}
                       onChange={(e) => updateRow(row.id, { url: e.target.value })}
-                      placeholder="https://example.com/…"
+                      placeholder={row.autoDiscoverArticle ? "https://example.com/ (home page)" : "https://example.com/…"}
                       className="min-w-0 flex-1 rounded border bg-panel px-1.5 py-1 text-xs outline-none focus:border-accent"
                     />
+                    <button
+                      type="button"
+                      onClick={() => updateRow(row.id, { autoDiscoverArticle: !row.autoDiscoverArticle })}
+                      title={
+                        row.autoDiscoverArticle
+                          ? "Visiting the URL as a home page and picking an article off it — click for a direct URL instead"
+                          : "Click to visit the URL as a home page and pick an article off it, instead of going there directly"
+                      }
+                      className={`shrink-0 rounded border px-1.5 py-1 text-[10px] ${
+                        row.autoDiscoverArticle
+                          ? "border-accent bg-accent/10 text-accent"
+                          : "border-border text-muted hover:text-foreground"
+                      }`}
+                    >
+                      {row.autoDiscoverArticle ? "🏠→📄" : "🔗"}
+                    </button>
                     <button
                       type="button"
                       onClick={() => removeRow(row.id)}
@@ -660,6 +693,9 @@ function PageResultCard({
       {!isRunning && result && (
         <div className="border-t px-3 py-2 text-[11px] text-muted">
           {result.adStatus !== "unknown" && <div className="mb-1 text-foreground">{result.adReason}</div>}
+          {row.autoDiscoverArticle && (
+            <div className="mb-1">🏠→📄 auto-picked from {row.url}</div>
+          )}
           {result.pageTitle && <div className="truncate text-foreground">{result.pageTitle}</div>}
           <div className="truncate" title={result.finalUrl ?? row.url}>
             {result.finalUrl ?? row.url}

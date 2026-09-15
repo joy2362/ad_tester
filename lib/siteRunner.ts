@@ -97,6 +97,83 @@ function highlightAdElements(terms: string[]): number {
   return found.length;
 }
 
+interface ArticleCandidate {
+  url: string;
+  text: string;
+}
+
+/**
+ * Runs in the page (on a home/listing page) — collects same-site links that
+ * plausibly go to an article: long visible link text (a headline, not a nav
+ * item), inside an article-ish context first, falling back to any long-text
+ * same-site link, and excluding obvious non-article sections (tag/category/
+ * account/legal pages etc).
+ */
+function discoverArticleLinks(homeHost: string): ArticleCandidate[] {
+  const NON_ARTICLE_PATH_RE =
+    /^\/(tag|tags|topic|topics|category|categories|section|sections|author|authors|about|about-us|contact|advertise|privacy|privacy-policy|terms|terms-of-service|cookie|cookies|search|login|signin|signup|register|subscribe|subscription|account|profile|rss|feed|feeds|sitemap|newsletter|jobs|careers)(\/|$)/i;
+
+  const looksLikeArticleUrl = (href: string): string | null => {
+    let u: URL;
+    try {
+      u = new URL(href, location.href);
+    } catch {
+      return null;
+    }
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    if (u.hostname.replace(/^www\./, "") !== homeHost) return null;
+    const path = u.pathname;
+    if (path === "" || path === "/") return null;
+    if (NON_ARTICLE_PATH_RE.test(path)) return null;
+    u.hash = "";
+    return u.toString();
+  };
+
+  const isVisible = (el: Element) => {
+    const r = el.getBoundingClientRect();
+    return r.width > 10 && r.height > 10;
+  };
+
+  const seen = new Set<string>();
+  const candidates: ArticleCandidate[] = [];
+  const collect = (nodes: NodeListOf<Element>, minTextLen: number) => {
+    nodes.forEach((el) => {
+      if (candidates.length >= 40) return;
+      const a = el as HTMLAnchorElement;
+      const href = a.getAttribute("href");
+      if (!href) return;
+      const text = (a.textContent || "").trim();
+      if (text.length < minTextLen) return;
+      if (!isVisible(a)) return;
+      const abs = looksLikeArticleUrl(href);
+      if (!abs || seen.has(abs)) return;
+      seen.add(abs);
+      candidates.push({ url: abs, text: text.slice(0, 140) });
+    });
+  };
+
+  collect(
+    document.querySelectorAll(
+      [
+        "article a[href]",
+        "h1 a[href]",
+        "h2 a[href]",
+        "h3 a[href]",
+        '[class*="headline" i] a[href]',
+        '[class*="article" i] a[href]',
+        '[class*="story" i] a[href]',
+        '[class*="teaser" i] a[href]',
+        '[class*="card" i] a[href]',
+      ].join(","),
+    ),
+    15,
+  );
+  if (!candidates.length) {
+    collect(document.querySelectorAll("a[href]"), 25);
+  }
+  return candidates;
+}
+
 export async function checkSitePage(
   input: SitePageInput,
   options: SiteCheckOptions,
@@ -139,8 +216,57 @@ export async function checkSitePage(
     context = opened.value.ctx;
     const page: Page = opened.value.pg;
 
+    // "Article page" via auto-discovery: visit `input.url` as a home/listing
+    // page, pick a same-site article link off it, and check THAT page instead
+    // — the home page itself is never scored for ad-serving here.
+    let targetUrl = valid.url.toString();
+    if (input.autoDiscoverArticle) {
+      let homeNavError: string | null = null;
+      try {
+        await page.goto(targetUrl, { waitUntil: "load", timeout: options.timeoutMs });
+      } catch (err) {
+        homeNavError = err instanceof Error ? err.message : String(err);
+      }
+      // Give the home page a short, fixed window to render its link list —
+      // independent of settleMs, which is reserved for the article page.
+      await withTimeout(
+        page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {}),
+        5000,
+        undefined,
+      );
+      await page.waitForTimeout(1000);
+
+      if (homeNavError && !(await withTimeout(page.title(), 2000, null).catch(() => null))) {
+        return errored(
+          input,
+          `Could not load the home page to find an article: ${homeNavError}`,
+          Date.now() - started,
+        );
+      }
+
+      const homeHost = valid.url.hostname.replace(/^www\./, "");
+      const candidates = await withTimeout(
+        page.evaluate(discoverArticleLinks, homeHost),
+        5000,
+        [] as ArticleCandidate[],
+      ).catch(() => [] as ArticleCandidate[]);
+
+      if (!candidates.length) {
+        return errored(
+          input,
+          "Could not find an article link on the home page — the page may need JS interaction, or its markup doesn't look like a typical article listing.",
+          Date.now() - started,
+        );
+      }
+
+      const chosen = candidates[Math.floor(Math.random() * candidates.length)];
+      targetUrl = chosen.url;
+    }
+
     // Watch for requests to "our ad" (if a pattern was given) so we can tell
-    // whether the ad actually filled, not just whether the page loaded.
+    // whether the ad actually filled, not just whether the page loaded. Only
+    // for the final (article, or direct) page — the home-page hop above isn't
+    // scored.
     const adRequests: { url: string; status: number | null; failed: boolean }[] = [];
     const passbackChecks: Promise<boolean>[] = [];
     if (adTerms.length) {
@@ -174,7 +300,7 @@ export async function checkSitePage(
 
     let navError: string | null = null;
     try {
-      await page.goto(valid.url.toString(), { waitUntil: "load", timeout: options.timeoutMs });
+      await page.goto(targetUrl, { waitUntil: "load", timeout: options.timeoutMs });
     } catch (err) {
       navError = err instanceof Error ? err.message : String(err);
     }

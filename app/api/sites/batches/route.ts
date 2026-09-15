@@ -70,6 +70,7 @@ function sanitizePage(raw: unknown): SitePageResult {
     portal: typeof p.portal === "string" ? p.portal : "",
     pageLabel: typeof p.pageLabel === "string" ? p.pageLabel : "Page",
     url: typeof p.url === "string" ? p.url : "",
+    autoDiscoverArticle: Boolean(p.autoDiscoverArticle),
     status: p.status === "ok" ? "ok" : "error",
     error: typeof p.error === "string" ? p.error : null,
     finalUrl: typeof p.finalUrl === "string" ? p.finalUrl : null,

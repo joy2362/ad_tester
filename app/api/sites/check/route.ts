@@ -30,6 +30,7 @@ export async function POST(request: Request) {
     portal: typeof pageInput?.portal === "string" ? pageInput.portal.trim().slice(0, 120) : "",
     pageLabel: typeof pageInput?.pageLabel === "string" ? pageInput.pageLabel.trim().slice(0, 60) : "Page",
     url,
+    autoDiscoverArticle: Boolean(pageInput?.autoDiscoverArticle),
   };
 
   const options = normalizeOptions(input.options);

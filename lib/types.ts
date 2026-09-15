@@ -159,7 +159,14 @@ export interface SitePageInput {
   id: string;
   portal: string;
   pageLabel: string;
+  /**
+   * The page to visit — or, when autoDiscoverArticle is set, the portal's HOME
+   * page to start from. `finalUrl` on the result then shows which article it
+   * actually ended up on.
+   */
   url: string;
+  /** Visit `url` as a home page, pick a same-site article link off it at random, then check that article instead. */
+  autoDiscoverArticle?: boolean;
 }
 
 export interface SiteCheckOptions {
