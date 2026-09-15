@@ -63,29 +63,78 @@ export function resetBrowser(): void {
   browserPromise = null;
 }
 
-function isDeadBrowserError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  return /has been closed|disconnected|target (page|context or browser) .*closed/i.test(msg);
+// A hard-rejecting timeout (unlike withTimeout, which resolves to a fallback) —
+// used to bound browser/context/page acquisition, because a stale connection
+// doesn't always reject promptly. It can hang indefinitely instead (observed on
+// Vercel: a "dead" cached browser's newPage() neither resolved nor rejected for
+// 30s+), so a plain try/catch around it never gets the chance to retry.
+function withDeadline<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
+const ACQUIRE_TIMEOUT_MS = 15_000;
+
+export interface BrowserSession<T> {
+  value: T;
+  /** Must be called (in a `finally`) once the whole run is done with the browser. */
+  closeBrowser: () => Promise<void>;
 }
 
 /**
- * Runs `fn` against the shared browser. Vercel can freeze/reap a function
- * instance's child processes between invocations while the warm Node module
- * still holds a reference to the (now-dead) Browser object — `isConnected()`
- * can pass right before a call fails with e.g. "browserContext.newPage:
- * Target page, context or browser has been closed". On that specific failure,
- * reset the singleton and retry once with a freshly launched browser; any
- * other error (a real page/tag problem) is not retried.
+ * Opens a browser and hands it to `fn` (typically "create a context + page and
+ * return them") — bounded so a stale/wedged connection can't hang the request.
+ * `fn` should do only that acquisition step, not the rest of the run: the
+ * browser must stay alive for however long the caller then uses the returned
+ * context/page, so closing happens via the returned `closeBrowser()`, called
+ * once the whole operation (navigation, screenshot, etc.) has finished.
+ *
+ * On serverless (Vercel/Lambda), a function instance's child processes can be
+ * frozen or reaped between invocations while the warm Node module still holds
+ * a reference to the (now-dead) Browser — `isConnected()` can report true right
+ * before a real call hangs or fails (observed: newPage() hanging 30s+ with no
+ * rejection). Rather than chase that race with a shared singleton, serverless
+ * launches a **fresh browser per call** and closes it when the caller is done —
+ * the ~1-3s extra cold start is worth the reliability. Locally (one
+ * long-running dev/prod process) the singleton is safe and worth reusing, with
+ * a reset-and-retry-once fallback if it ever does go stale.
  */
-export async function withBrowser<T>(fn: (browser: Browser) => Promise<T>): Promise<T> {
-  const browser = await getBrowser();
+export async function withBrowser<T>(fn: (browser: Browser) => Promise<T>): Promise<BrowserSession<T>> {
+  if (isServerless) {
+    const browser = await launchBrowser();
+    try {
+      const value = await withDeadline(fn(browser), ACQUIRE_TIMEOUT_MS, "browser operation timed out");
+      return { value, closeBrowser: () => browser.close().catch(() => {}) };
+    } catch (err) {
+      await browser.close().catch(() => {});
+      throw err;
+    }
+  }
+
+  let browser = await getBrowser();
   try {
-    return await fn(browser);
-  } catch (err) {
-    if (!isDeadBrowserError(err)) throw err;
+    const value = await withDeadline(fn(browser), ACQUIRE_TIMEOUT_MS, "browser operation timed out");
+    return { value, closeBrowser: async () => {} };
+  } catch {
     resetBrowser();
-    const fresh = await getBrowser();
-    return fn(fresh);
+    browser = await getBrowser();
+    const value = await withDeadline(
+      fn(browser),
+      ACQUIRE_TIMEOUT_MS,
+      "browser operation timed out (after retry)",
+    );
+    return { value, closeBrowser: async () => {} };
   }
 }
 

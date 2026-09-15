@@ -54,14 +54,16 @@ export async function checkSitePage(
   const started = Date.now();
   let context: BrowserContext | null = null;
   let videoDir: string | null = null;
+  let closeBrowser: (() => Promise<void>) | null = null;
 
   try {
     if (options.recordVideo) {
       videoDir = await fs.mkdtemp(path.join(os.tmpdir(), "adtester-video-"));
     }
 
-    // withBrowser retries once with a freshly launched browser if the shared
-    // singleton died between serverless invocations (see lib/browser.ts).
+    // On serverless this launches a dedicated browser for this one check and
+    // closeBrowser() (called in `finally`) closes it; locally it reuses the
+    // shared singleton. See lib/browser.ts for why the split exists.
     const opened = await withBrowser(async (browser) => {
       const ctx = await browser.newContext({
         viewport: { width: options.viewportWidth, height: options.viewportHeight },
@@ -78,8 +80,9 @@ export async function checkSitePage(
       const pg = await ctx.newPage();
       return { ctx, pg };
     });
-    context = opened.ctx;
-    const page: Page = opened.pg;
+    closeBrowser = opened.closeBrowser;
+    context = opened.value.ctx;
+    const page: Page = opened.value.pg;
 
     let navError: string | null = null;
     try {
@@ -170,6 +173,7 @@ export async function checkSitePage(
     );
   } finally {
     if (context) await context.close().catch(() => {});
+    if (closeBrowser) await closeBrowser();
     if (videoDir) await fs.rm(videoDir, { recursive: true, force: true }).catch(() => {});
   }
 }

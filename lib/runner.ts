@@ -65,6 +65,7 @@ export async function executeRun(
 
   const started = Date.now();
   let context: BrowserContext | null = null;
+  let closeBrowser: (() => Promise<void>) | null = null;
 
   const requestsByObj = new Map<PWRequest, NetRequest>();
   const consoleMessages: ConsoleMsg[] = [];
@@ -77,8 +78,9 @@ export async function executeRun(
   let bodiesRead = 0;
 
   try {
-    // withBrowser retries once with a freshly launched browser if the shared
-    // singleton died between serverless invocations (see lib/browser.ts).
+    // On serverless this launches a dedicated browser for this one run and
+    // closeBrowser() (called in `finally`) closes it; locally it reuses the
+    // shared singleton. See lib/browser.ts for why the split exists.
     const opened = await withBrowser(async (browser) => {
       const ctx = await browser.newContext({
         viewport: { width: options.viewportWidth, height: options.viewportHeight },
@@ -115,8 +117,9 @@ export async function executeRun(
       const pg = await ctx.newPage();
       return { ctx, pg };
     });
-    context = opened.ctx;
-    const page: Page = opened.pg;
+    closeBrowser = opened.closeBrowser;
+    context = opened.value.ctx;
+    const page: Page = opened.value.pg;
     const mainFrame = page.mainFrame();
 
     page.on("framenavigated", (frame) => {
@@ -387,6 +390,7 @@ export async function executeRun(
     };
   } finally {
     if (context) await context.close().catch(() => {});
+    if (closeBrowser) await closeBrowser();
   }
 }
 
