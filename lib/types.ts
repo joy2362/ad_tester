@@ -151,3 +151,73 @@ export const DEFAULT_OPTIONS: RunOptions = {
   captureBodies: true,
   stealth: false,
 };
+
+/* -------------------------- Site checker (live pages) -------------------------- */
+
+/** One page to visit — a publisher portal + which page type on it (home, article, ...). */
+export interface SitePageInput {
+  id: string;
+  portal: string;
+  pageLabel: string;
+  url: string;
+}
+
+export interface SiteCheckOptions {
+  viewportWidth: number;
+  viewportHeight: number;
+  timeoutMs: number;
+  settleMs: number;
+  fullPage: boolean;
+  stealth: boolean;
+  recordVideo: boolean;
+}
+
+export interface SitePageResult extends SitePageInput {
+  status: "ok" | "error";
+  error: string | null;
+  finalUrl: string | null;
+  pageTitle: string | null;
+  loadTimeMs: number | null;
+  screenshot: string | null;
+  screenshotBytes: number | null;
+  screenshotOmitted: boolean;
+  /** Only ever present in the immediate API response — never persisted (see lib/siteDb.ts). */
+  video: string | null;
+  videoBytes: number | null;
+  checkedAt: number;
+}
+
+export interface SiteBatchRecord {
+  id: string;
+  createdAt: number;
+  label: string | null;
+  options: SiteCheckOptions;
+  pages: SitePageResult[];
+}
+
+export interface SiteBatchSummary {
+  id: string;
+  createdAt: number;
+  label: string | null;
+  pageCount: number;
+  okCount: number;
+  errorCount: number;
+}
+
+export const DEFAULT_SITE_OPTIONS: SiteCheckOptions = {
+  viewportWidth: 1280,
+  viewportHeight: 900,
+  timeoutMs: 25000,
+  settleMs: 4000,
+  fullPage: true,
+  stealth: false,
+  recordVideo: false,
+};
+
+export const PAGE_LABEL_SUGGESTIONS = [
+  "Home page",
+  "Article page",
+  "Category page",
+  "Search results",
+  "Video page",
+];

@@ -1,206 +1,53 @@
-import type { RedisClientType } from "redis";
+import { createRecordStore } from "./store";
 import type { RunRecord, RunSummary } from "./types";
 
 /**
- * Run persistence.
- *
- * Serverless (Vercel) has a read-only filesystem, so there is no on-disk store.
- * If a Redis connection string is present (Vercel-managed Redis injects
- * `REDIS_URL`; the old Vercel KV used `KV_URL`) we persist there via node-redis;
- * otherwise we fall back to an in-process Map — fine for local dev / a quick
- * demo, but ephemeral (a warm instance keeps it, a cold one starts empty).
- *
+ * Ad-tag run persistence. See lib/store.ts for the Redis/memory mechanics.
  * To enable persistence on Vercel: Storage → create/connect a Redis store to the
  * project's Production + Preview environments, then redeploy. No code change.
  */
 
-const KEY_PREFIX = "adtester:run:";
-const INDEX_KEY = "adtester:runs:index";
-const MAX_RUNS = 200;
-const TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
-const MAX_VALUE_BYTES = 1_000_000; // keep individual records lean
-
-const redisUrl = process.env.REDIS_URL || process.env.KV_URL || "";
-
-interface Store {
-  kind: "redis" | "memory";
-  insert(record: RunRecord): Promise<void>;
-  get(id: string): Promise<RunRecord | null>;
-  remove(id: string): Promise<boolean>;
-  list(limit: number): Promise<RunRecord[]>;
-}
-
-/* ----------------------------- in-memory store ---------------------------- */
-
-function createMemoryStore(): Store {
-  const map = new Map<string, RunRecord>();
-  return {
-    kind: "memory",
-    async insert(record) {
-      map.set(record.id, record);
-      if (map.size > MAX_RUNS) {
-        const oldest = [...map.values()].sort((a, b) => a.createdAt - b.createdAt)[0];
-        if (oldest) map.delete(oldest.id);
-      }
-    },
-    async get(id) {
-      return map.get(id) ?? null;
-    },
-    async remove(id) {
-      return map.delete(id);
-    },
-    async list(limit) {
-      return [...map.values()].sort((a, b) => b.createdAt - a.createdAt).slice(0, limit);
-    },
-  };
-}
-
-/* ------------------------------- redis store ----------------------------- */
-
-function serialize(record: RunRecord): string {
-  let json = JSON.stringify(record);
-  if (json.length > MAX_VALUE_BYTES && record.result) {
+const store = createRecordStore<RunRecord>({
+  keyPrefix: "adtester:run:",
+  indexKey: "adtester:runs:index",
+  maxRecords: 200,
+  shrinkSteps: [
     // Drop the (large) screenshot rather than fail the whole write.
-    json = JSON.stringify({ ...record, result: { ...record.result, screenshot: null } });
-  }
-  if (json.length > MAX_VALUE_BYTES && record.result) {
+    (r) => (r.result ? { ...r, result: { ...r.result, screenshot: null } } : r),
     // Still too big — drop captured response bodies too.
-    json = JSON.stringify({
-      ...record,
-      result: {
-        ...record.result,
-        screenshot: null,
-        requests: record.result.requests.map((r) => ({
-          ...r,
-          bodyPreview: null,
-          bodyTruncated: r.bodyTruncated || Boolean(r.bodyPreview),
-        })),
-      },
-    });
-  }
-  return json;
-}
-
-function parse(raw: string | null): RunRecord | null {
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as RunRecord;
-  } catch {
-    return null;
-  }
-}
-
-function createRedisStore(url: string): Store {
-  let clientPromise: Promise<RedisClientType> | null = null;
-
-  async function client(): Promise<RedisClientType> {
-    if (!clientPromise) {
-      // Dynamic import so the `redis` package is never needed at route
-      // module-load time — a bundling/resolution miss degrades to a caught
-      // runtime error instead of crashing the whole function.
-      clientPromise = import("redis")
-        .then(async ({ createClient }) => {
-          const c = createClient({
-            url,
-            // Fail fast: bound the initial connect and give up after a few
-            // retries instead of blocking the request until the function times out.
-            socket: {
-              connectTimeout: 4000,
-              reconnectStrategy: (retries) => (retries > 3 ? false : Math.min(retries * 200, 800)),
+    (r) =>
+      r.result
+        ? {
+            ...r,
+            result: {
+              ...r.result,
+              requests: r.result.requests.map((req) => ({
+                ...req,
+                bodyPreview: null,
+                bodyTruncated: req.bodyTruncated || Boolean(req.bodyPreview),
+              })),
             },
-          }) as RedisClientType;
-          c.on("error", (err) => console.error("redis client error:", err));
-          const connecting = c.connect();
-          connecting.catch(() => {}); // avoid an unhandled rejection if the race times out first
-          await Promise.race([
-            connecting,
-            new Promise((_, reject) =>
-              setTimeout(() => reject(new Error("redis connect timed out")), 5000),
-            ),
-          ]);
-          return c;
-        })
-        .catch((err) => {
-          clientPromise = null;
-          throw err;
-        });
-    }
-    return clientPromise;
-  }
+          }
+        : r,
+  ],
+});
 
-  return {
-    kind: "redis",
-    async insert(record) {
-      const c = await client();
-      await c.set(KEY_PREFIX + record.id, serialize(record), { EX: TTL_SECONDS });
-      await c.zAdd(INDEX_KEY, { score: record.createdAt, value: record.id });
-      await c.zRemRangeByRank(INDEX_KEY, 0, -(MAX_RUNS + 1));
-    },
-    async get(id) {
-      const c = await client();
-      return parse(await c.get(KEY_PREFIX + id));
-    },
-    async remove(id) {
-      const c = await client();
-      const removed = await c.del(KEY_PREFIX + id);
-      await c.zRem(INDEX_KEY, id);
-      return removed > 0;
-    },
-    async list(limit) {
-      const c = await client();
-      const ids = await c.zRange(INDEX_KEY, 0, limit - 1, { REV: true });
-      if (!ids.length) return [];
-      const raws = await c.mGet(ids.map((id) => KEY_PREFIX + id));
-      return raws.map(parse).filter((r): r is RunRecord => Boolean(r));
-    },
-  };
-}
-
-/* -------------------------------- selection ----------------------------- */
-
-const fallback = createMemoryStore();
-let primary: Store;
-try {
-  primary = redisUrl ? createRedisStore(redisUrl) : fallback;
-} catch (err) {
-  console.error("Redis store init failed, using memory:", err);
-  primary = fallback;
-}
-
-export const storeKind = primary.kind;
-
-// If a Redis op throws (bad URL, TLS, network, package resolution), don't 500 the
-// request — log once and serve from the in-process store instead.
-let redisBroken = false;
-async function run<T>(op: (s: Store) => Promise<T>): Promise<T> {
-  if (primary === fallback || redisBroken) return op(fallback);
-  try {
-    return await op(primary);
-  } catch (err) {
-    if (!redisBroken) {
-      redisBroken = true;
-      console.error("Redis unavailable, falling back to in-memory store:", err);
-    }
-    return op(fallback);
-  }
-}
-
-/* --------------------------------- API --------------------------------- */
+export const storeKind = store.kind;
 
 export async function insertRun(record: RunRecord): Promise<void> {
-  await run((s) => s.insert(record));
+  await store.insert(record);
 }
 
 export async function getRun(id: string): Promise<RunRecord | null> {
-  return run((s) => s.get(id));
+  return store.get(id);
 }
 
 export async function deleteRun(id: string): Promise<boolean> {
-  return run((s) => s.remove(id));
+  return store.remove(id);
 }
 
 export async function listRuns(limit = 50): Promise<RunSummary[]> {
-  const records = await run((s) => s.list(limit));
+  const records = await store.list(limit);
   return records.map(summarize);
 }
 
