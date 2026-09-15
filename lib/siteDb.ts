@@ -53,5 +53,7 @@ function summarize(batch: SiteBatchRecord): SiteBatchSummary {
     pageCount: batch.pages.length,
     okCount: batch.pages.filter((p) => p.status === "ok").length,
     errorCount: batch.pages.filter((p) => p.status === "error").length,
+    servingCount: batch.pages.filter((p) => p.adStatus === "serving").length,
+    noFillCount: batch.pages.filter((p) => p.adStatus === "no_fill" || p.adStatus === "not_detected").length,
   };
 }

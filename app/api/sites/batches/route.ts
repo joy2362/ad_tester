@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { insertSiteBatch, listSiteBatches } from "@/lib/siteDb";
-import { DEFAULT_SITE_OPTIONS, type SiteBatchRecord, type SiteCheckOptions, type SitePageResult } from "@/lib/types";
+import {
+  DEFAULT_SITE_OPTIONS,
+  type AdStatus,
+  type SiteBatchRecord,
+  type SiteCheckOptions,
+  type SitePageResult,
+} from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -74,8 +80,16 @@ function sanitizePage(raw: unknown): SitePageResult {
     screenshotOmitted: Boolean(p.screenshotOmitted),
     video: null, // never persisted
     videoBytes: typeof p.videoBytes === "number" ? p.videoBytes : null,
+    adStatus: isAdStatus(p.adStatus) ? p.adStatus : "unknown",
+    adReason: typeof p.adReason === "string" ? p.adReason : "",
+    adRequestCount: typeof p.adRequestCount === "number" ? p.adRequestCount : 0,
+    adElementDetected: Boolean(p.adElementDetected),
     checkedAt: typeof p.checkedAt === "number" ? p.checkedAt : Date.now(),
   };
+}
+
+function isAdStatus(v: unknown): v is AdStatus {
+  return v === "serving" || v === "no_fill" || v === "not_detected" || v === "unknown";
 }
 
 function normalizeOptions(raw: unknown): SiteCheckOptions {
@@ -88,6 +102,8 @@ function normalizeOptions(raw: unknown): SiteCheckOptions {
     fullPage: o.fullPage === undefined ? DEFAULT_SITE_OPTIONS.fullPage : Boolean(o.fullPage),
     stealth: Boolean(o.stealth),
     recordVideo: Boolean(o.recordVideo),
+    adMatch: typeof o.adMatch === "string" ? o.adMatch : DEFAULT_SITE_OPTIONS.adMatch,
+    onlyScreenshotIfServing: Boolean(o.onlyScreenshotIfServing),
   };
 }
 

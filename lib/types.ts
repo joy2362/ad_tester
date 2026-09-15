@@ -170,7 +170,24 @@ export interface SiteCheckOptions {
   fullPage: boolean;
   stealth: boolean;
   recordVideo: boolean;
+  /**
+   * Comma-separated domain(s) / URL substring(s) that identify "our ad" — e.g.
+   * "delivery.viewsense.ai". Empty = skip the network-based serving check
+   * (adStatus will be "unknown"); the DOM heuristic still runs either way.
+   */
+  adMatch: string;
+  /** Drop the screenshot unless the ad was confirmed serving. */
+  onlyScreenshotIfServing: boolean;
 }
+
+/**
+ * Whether "our ad" was confirmed present on the page:
+ * - "serving": a request matching adMatch got a real (non-passback) response
+ * - "no_fill": matching request(s) seen, but all were passback/failed/non-2xx
+ * - "not_detected": adMatch was set but no matching request was seen at all
+ * - "unknown": no adMatch configured, so the network check didn't run
+ */
+export type AdStatus = "serving" | "no_fill" | "not_detected" | "unknown";
 
 export interface SitePageResult extends SitePageInput {
   status: "ok" | "error";
@@ -184,6 +201,11 @@ export interface SitePageResult extends SitePageInput {
   /** Only ever present in the immediate API response — never persisted (see lib/siteDb.ts). */
   video: string | null;
   videoBytes: number | null;
+  adStatus: AdStatus;
+  adReason: string;
+  adRequestCount: number;
+  /** DOM heuristic: a plausible ad element (iframe/ad-labeled container) with visible size was found and outlined in the screenshot. */
+  adElementDetected: boolean;
   checkedAt: number;
 }
 
@@ -202,6 +224,8 @@ export interface SiteBatchSummary {
   pageCount: number;
   okCount: number;
   errorCount: number;
+  servingCount: number;
+  noFillCount: number;
 }
 
 export const DEFAULT_SITE_OPTIONS: SiteCheckOptions = {
@@ -212,6 +236,8 @@ export const DEFAULT_SITE_OPTIONS: SiteCheckOptions = {
   fullPage: true,
   stealth: false,
   recordVideo: false,
+  adMatch: "",
+  onlyScreenshotIfServing: false,
 };
 
 export const PAGE_LABEL_SUGGESTIONS = [

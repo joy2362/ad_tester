@@ -14,14 +14,26 @@ Two tools, one headless-Chromium backend. See `README.md`.
 - **Ad Tag Taster** (`/`): paste a tag → run it in a sandboxed browser → report
   requests, cookies, console errors, redirects, weight, rendered creative, passback.
 - **Site Checks** (`/sites`): list real publisher pages (portal + page type + URL) →
-  visit each directly → screenshot / optionally record video of what's actually there.
+  visit each directly → detect whether "our ad" (a configurable domain/URL pattern)
+  actually served, not just whether the page loaded → screenshot / optionally record
+  video of what's actually there.
 
-- `lib/browser.ts` is the **shared** browser singleton + stealth impl — both
-  `lib/runner.ts` (ad tag) and `lib/siteRunner.ts` (site checks) import `getBrowser()` /
-  `withTimeout` / `STEALTH_*` / `DEFAULT_UA` from it. One browser process, many
-  `BrowserContext`s (one per run/page, closed in `finally`). `isServerless` (VERCEL /
-  AWS_LAMBDA_FUNCTION_NAME) switches the launch to `@sparticuz/chromium`; otherwise the
-  browser from `@playwright/browser-chromium` (a devDependency) is used.
+- `lib/browser.ts` is the **shared** browser plumbing + stealth impl — both
+  `lib/runner.ts` (ad tag) and `lib/siteRunner.ts` (site checks) call `withBrowser(fn)`
+  (not `getBrowser()` directly) to get a `{ value, closeBrowser }` session; `fn` should
+  do ONLY acquisition (`browser.newContext()` + `newPage()`, return them) — the browser
+  must stay alive for the whole run, so the caller uses `value.{ctx,pg}` for
+  navigation/screenshot/etc. and calls `closeBrowser()` in its own `finally`, not inside
+  `fn`. On serverless this launches (and the caller closes) a **fresh browser per call**;
+  locally it reuses one singleton with a hard-deadline+reset+retry-once fallback. This
+  split exists because a Vercel instance can reap a browser's child process between
+  invocations while the warm module still holds a reference that *looks* connected —
+  using it doesn't reject, it can **hang indefinitely** (see git history: two separate
+  fixes were needed, a retry-on-error one first, which didn't cover the hang, then this
+  one). Don't reintroduce a cross-invocation singleton on the serverless path.
+  `isServerless` (VERCEL / AWS_LAMBDA_FUNCTION_NAME) switches the launch to
+  `@sparticuz/chromium`; otherwise the browser from `@playwright/browser-chromium` (a
+  devDependency) is used.
 - `lib/runner.ts` and `lib/siteRunner.ts` import `playwright-core` and are
   **server-only** — never import either (or anything importing them) from a client
   component. `lib/input.ts`, `lib/heuristics.ts`, `lib/types.ts` are safe on both sides.
@@ -49,6 +61,28 @@ Two tools, one headless-Chromium backend. See `README.md`.
   ignore it if it reappears). Video is capped ~8 MB inline and **never persisted**
   (`lib/siteDb.ts` nulls it defensively even if a caller sends it) — only ever present
   in the immediate `/api/sites/check` response.
+- **Ad-serving detection** (`SiteCheckOptions.adMatch`, comma-separated domain/URL
+  substrings, e.g. `delivery.viewsense.ai`) is the actual point of Site Checks — don't
+  regress it back into "just screenshot the page". Two independent signals, both in
+  `checkSitePage()`: (1) network — `page.on("response"/"requestfailed")` filters to URLs
+  containing an `adMatch` term, and `looksLikePassback()` (imported from
+  `lib/heuristics.ts`, same fn the ad-tag tester uses) scans matching response bodies →
+  `AdStatus` = `serving` / `no_fill` / `not_detected` / `unknown` (no pattern set); (2)
+  DOM — `highlightAdElements()` runs via `page.evaluate` right before the screenshot,
+  finds a plausible ad iframe/container (by `adMatch` term, a common-ad-host fallback
+  regex, or an `ad[-_]?(slot|unit|container|...)` class/id with visible media inside),
+  and outlines up to 5 in pink so the screenshot shows where the ad rendered →
+  `adElementDetected`. `onlyScreenshotIfServing` drops the screenshot (sets
+  `screenshotOmitted`) unless `adStatus === "serving"`. `AdStatus` lives in
+  `lib/types.ts`; keep `lib/db.ts`'s `looksLikePassback` usage and this one in sync if
+  the no-fill regex changes.
+- A `page.goto` **timeout** is not automatically a failed check — `checkSitePage()`
+  computes `hardNavFailure` (a real DNS/TLS/refused error, or a timeout with no
+  `pageTitle` at all) and only *that* sets `status: "error"`. A timeout on an
+  otherwise-loaded page (very common on heavy news homepages — ads/analytics keep the
+  page from ever going idle) stays `status: "ok"` with the timeout kept as `error` (shown
+  as a note, not a failure) — this was a real bug caught testing against cnn.com: the
+  page, ads and screenshot all came through fine but got marked as a failed check.
 - The ad-tag sandbox origin `https://sandbox.ad-tester.local/` is fulfilled by a
   Playwright route, not real DNS — this is specific to `lib/runner.ts`; site checks have
   no sandbox, they hit the real page.

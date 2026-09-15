@@ -66,6 +66,10 @@ function errorResult(input: SitePageInput, error: string): SitePageResult {
     screenshotOmitted: false,
     video: null,
     videoBytes: null,
+    adStatus: "unknown",
+    adReason: "Request failed before the ad could be checked.",
+    adRequestCount: 0,
+    adElementDetected: false,
     checkedAt: Date.now(),
   };
 }
@@ -220,12 +224,25 @@ export default function SiteChecker() {
     }
   }
 
+  const [resultFilter, setResultFilter] = useState<"all" | "serving" | "problem">("all");
+
   const orderedResults = useMemo(
     () => rows.map((r) => ({ row: r, result: results[r.id] })),
     [rows, results],
   );
   const doneCount = Object.keys(results).length;
   const queuedCount = rows.filter((r) => r.url.trim()).length;
+
+  const adChecked = Object.values(results).some((r) => r.adStatus !== "unknown");
+  const servingCount = Object.values(results).filter((r) => r.adStatus === "serving").length;
+  const problemCount = Object.values(results).filter(
+    (r) => r.adStatus === "no_fill" || r.adStatus === "not_detected" || r.status === "error",
+  ).length;
+  const visibleResults = orderedResults.filter(({ result }) => {
+    if (resultFilter === "all" || !result) return true;
+    if (resultFilter === "serving") return result.adStatus === "serving";
+    return result.adStatus === "no_fill" || result.adStatus === "not_detected" || result.status === "error";
+  });
 
   return (
     <div className="grid grid-cols-1 gap-5 lg:grid-cols-[440px_minmax(0,1fr)]">
@@ -328,6 +345,23 @@ export default function SiteChecker() {
             + add row
           </button>
 
+          <div className="mt-3 rounded-md border border-accent/30 bg-accent/5 p-2.5">
+            <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-accent">
+              What identifies your ad?
+            </label>
+            <input
+              value={options.adMatch}
+              onChange={(e) => setOptions((o) => ({ ...o, adMatch: e.target.value }))}
+              placeholder="e.g. delivery.viewsense.ai (comma-separate several)"
+              className="w-full rounded-md border bg-panel px-2 py-1.5 text-sm outline-none focus:border-accent"
+            />
+            <p className="mt-1 text-[11px] leading-snug text-muted">
+              Domain(s) or URL keyword(s) your ad calls out to. Each page check watches network
+              traffic for a match and tells you whether it filled or no-filled — leave blank to just
+              screenshot without a serving verdict.
+            </p>
+          </div>
+
           <div className="mt-3">
             <label className="mb-1 block text-[11px] uppercase tracking-wider text-muted">
               Batch label (optional)
@@ -398,6 +432,17 @@ export default function SiteChecker() {
                   (keeps storage small). Adds time per page.
                 </span>
               </label>
+              <label className="col-span-2 flex items-start gap-2 text-muted">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={options.onlyScreenshotIfServing}
+                  onChange={(e) => setOptions((o) => ({ ...o, onlyScreenshotIfServing: e.target.checked }))}
+                />
+                <span>
+                  Only keep the screenshot when the ad is confirmed serving (requires the field above).
+                </span>
+              </label>
             </div>
           )}
 
@@ -450,7 +495,9 @@ export default function SiteChecker() {
                   }`}
                 >
                   <span
-                    className={`h-1.5 w-1.5 shrink-0 rounded-full ${h.errorCount ? "bg-warn" : "bg-ok"}`}
+                    className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                      h.noFillCount ? "bg-fail" : h.errorCount ? "bg-warn" : "bg-ok"
+                    }`}
                   />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-foreground">
@@ -458,7 +505,10 @@ export default function SiteChecker() {
                       {loadingId === h.id && " …"}
                     </span>
                     <span className="block truncate text-muted">
-                      {new Date(h.createdAt).toLocaleString()} · {h.okCount}/{h.pageCount} ok
+                      {new Date(h.createdAt).toLocaleString()} ·{" "}
+                      {h.servingCount + h.noFillCount > 0
+                        ? `${h.servingCount}/${h.pageCount} serving`
+                        : `${h.okCount}/${h.pageCount} ok`}
                     </span>
                   </span>
                   <span
@@ -488,11 +538,35 @@ export default function SiteChecker() {
             Add pages and run the check to see screenshots here.
           </div>
         ) : (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-            {orderedResults.map(({ row, result }) => (
-              <PageResultCard key={row.id} row={row} result={result} isRunning={runningIds.has(row.id)} />
-            ))}
-          </div>
+          <>
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              {adChecked && (
+                <span className="text-xs text-muted">
+                  <span className="text-ok">{servingCount} serving</span>
+                  {" · "}
+                  <span className="text-fail">{problemCount} not serving</span>
+                  {" · "}
+                  {doneCount} checked
+                </span>
+              )}
+              <div className="ml-auto flex gap-1 text-[11px]">
+                <FilterChip active={resultFilter === "all"} onClick={() => setResultFilter("all")}>
+                  all
+                </FilterChip>
+                <FilterChip active={resultFilter === "serving"} onClick={() => setResultFilter("serving")}>
+                  serving
+                </FilterChip>
+                <FilterChip active={resultFilter === "problem"} onClick={() => setResultFilter("problem")}>
+                  problems
+                </FilterChip>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+              {visibleResults.map(({ row, result }) => (
+                <PageResultCard key={row.id} row={row} result={result} isRunning={runningIds.has(row.id)} />
+              ))}
+            </div>
+          </>
         )}
       </div>
     </div>
@@ -533,6 +607,27 @@ function PageResultCard({
         )}
       </div>
 
+      {!isRunning && result && result.adStatus !== "unknown" && (
+        <div
+          className={`flex items-center gap-1.5 border-b px-3 py-1.5 text-[11px] font-semibold ${
+            result.adStatus === "serving"
+              ? "bg-ok/10 text-ok"
+              : result.adStatus === "no_fill"
+                ? "bg-fail/10 text-fail"
+                : "bg-warn/10 text-warn"
+          }`}
+        >
+          <span>
+            {result.adStatus === "serving"
+              ? "● AD SERVING"
+              : result.adStatus === "no_fill"
+                ? "● AD NOT SERVING (no-fill)"
+                : "● AD NOT DETECTED"}
+          </span>
+          {result.adElementDetected && <span className="font-normal opacity-80">· highlighted below</span>}
+        </div>
+      )}
+
       <div className="flex min-h-32 flex-1 items-center justify-center bg-panel-2 p-2">
         {isRunning && <span className="text-xs text-muted">Visiting page…</span>}
         {!isRunning && result?.screenshot && (
@@ -550,7 +645,9 @@ function PageResultCard({
         )}
         {!isRunning && result && !result.screenshot && result.status === "ok" && (
           <span className="text-xs text-muted">
-            {result.screenshotOmitted ? "Screenshot dropped to save space." : "No screenshot captured."}
+            {result.screenshotOmitted
+              ? "Ad not confirmed serving — screenshot skipped."
+              : "No screenshot captured."}
           </span>
         )}
         {!isRunning && !result && <span className="text-xs text-muted">Not run yet.</span>}
@@ -562,6 +659,7 @@ function PageResultCard({
 
       {!isRunning && result && (
         <div className="border-t px-3 py-2 text-[11px] text-muted">
+          {result.adStatus !== "unknown" && <div className="mb-1 text-foreground">{result.adReason}</div>}
           {result.pageTitle && <div className="truncate text-foreground">{result.pageTitle}</div>}
           <div className="truncate" title={result.finalUrl ?? row.url}>
             {result.finalUrl ?? row.url}
@@ -582,6 +680,28 @@ function PageResultCard({
         </div>
       )}
     </div>
+  );
+}
+
+function FilterChip({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded border px-2 py-0.5 ${
+        active ? "border-accent bg-accent/10 text-foreground" : "border-border text-muted hover:text-foreground"
+      }`}
+    >
+      {children}
+    </button>
   );
 }
 

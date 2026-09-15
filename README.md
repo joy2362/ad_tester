@@ -7,6 +7,7 @@ Two tools sharing one headless-Chromium backend:
   redirects, payload weight, and the rendered creative.
 - **Site Checks** (`/sites`) — list the real publisher pages a campaign should be live
   on (portal + page type, e.g. Home / Article), visit each one directly in a browser,
+  detect whether **your ad** actually served there (not just whether the page loaded),
   and screenshot (or record video of) what's actually there.
 
 ## Stack
@@ -61,17 +62,36 @@ inspecting one tag in isolation:
 
 1. Add pages — one row per (portal, page type, URL), or paste a bulk list
    (`Portal | Page label | URL` per line, or bare URLs).
-2. **Run** visits each URL directly (no sandbox — real navigation) in its own browser
+2. Set **"What identifies your ad?"** — a comma-separated domain/URL keyword (e.g.
+   `delivery.viewsense.ai`). This is what turns the tool from "screenshot every page"
+   into "confirm the ad is actually there": every page check watches network traffic
+   for a match and reports one of:
+   - **serving** — a matching request got a real (non-passback) response
+   - **no_fill** — matching request(s) seen, but they were passback/no-fill/failed
+     (reuses `looksLikePassback()` from the ad-tag tester's heuristics)
+   - **not_detected** — nothing matching the pattern was ever requested on the page
+   - **unknown** — no pattern configured, network check skipped
+   Independent of that, a DOM heuristic looks for a visibly-sized iframe/container that
+   reads as an ad slot and outlines it in pink before the screenshot, so you can see
+   *where* it rendered. Leave the field blank to just screenshot without a verdict.
+3. **Run** visits each URL directly (no sandbox — real navigation) in its own browser
    context, waits for load + a settle delay, then screenshots it (viewport or full page).
-   Optionally records a short video of the load instead of/alongside the screenshot.
-3. The client calls `/api/sites/check` **once per page** with limited concurrency (2 at
+   Optionally records a short video of the load instead of/alongside the screenshot, and
+   optionally **only keeps the screenshot when the ad is confirmed serving**
+   (`onlyScreenshotIfServing`).
+4. The client calls `/api/sites/check` **once per page** with limited concurrency (2 at
    a time) rather than looping server-side — that keeps every request well under
    Vercel's function timeout no matter how many pages are queued, and streams results
    into the UI as each one finishes instead of all-or-nothing.
-4. The finished batch auto-saves to **History** — screenshots persist; **video does
+5. The finished batch auto-saves to **History** — screenshots persist; **video does
    not** (only ever present in the immediate response) to keep Redis usage bounded.
-5. Same `stealth` option as the ad-tag tester, useful when a publisher page's own ad
+   History rows show serving counts once any page in that batch had a pattern set.
+6. Same `stealth` option as the ad-tag tester, useful when a publisher page's own ad
    slots also skip serving to headless traffic.
+7. A `page.goto` **timeout** on an otherwise-loaded page (title/ads/screenshot all came
+   through — common on heavy news homepages that never go fully network-idle) is kept as
+   a note, not treated as a failed check; only a genuine DNS/TLS/refused-style failure
+   (or a timeout with literally nothing loaded) marks the page as errored.
 
 A hard navigation failure (DNS/TLS/timeout) is reported as `status: "error"`; an HTTP
 error page (404/500) still loads and screenshots normally with `status: "ok"`.

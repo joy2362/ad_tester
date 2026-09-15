@@ -64,6 +64,8 @@ function normalizeOptions(raw: unknown): SiteCheckOptions {
     fullPage: o.fullPage === undefined ? DEFAULT_SITE_OPTIONS.fullPage : Boolean(o.fullPage),
     stealth: Boolean(o.stealth),
     recordVideo,
+    adMatch: typeof o.adMatch === "string" ? o.adMatch.trim().slice(0, 300) : DEFAULT_SITE_OPTIONS.adMatch,
+    onlyScreenshotIfServing: Boolean(o.onlyScreenshotIfServing),
   };
 }
 
